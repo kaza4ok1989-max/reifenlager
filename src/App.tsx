@@ -4,6 +4,7 @@ import type { FormEvent } from 'react';
 import type { Session } from '@supabase/supabase-js';
 import { supabase } from './supabase';
 import Einlagerungsschein from './Einlagerungsschein';
+import LagerUebersicht from './LagerUebersicht';
 import {
   Search, ScanLine, Plus, CarFront, CircleDot,
   Warehouse, FileText, History, FileSpreadsheet,
@@ -725,9 +726,11 @@ export default function App() {
             </>
           )}
 
+          {(page === 'Radsätze' || page === 'Lagerplan') && <LagerUebersicht view={page} />}
+
           {page === 'Einlagerungsscheine' && <Einlagerungsschein />}
 
-          {page !== 'Dashboard' && page !== 'Fahrzeuge' && page !== 'Einlagerungsscheine' && (
+          {page !== 'Dashboard' && page !== 'Fahrzeuge' && page !== 'Einlagerungsscheine' && page !== 'Radsätze' && page !== 'Lagerplan' && (
             <>
               <button
                 onClick={() => setPage('Dashboard')}
