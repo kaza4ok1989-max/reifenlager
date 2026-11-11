@@ -7,7 +7,7 @@ import Einlagerungsschein from './Einlagerungsschein';
 import {
   Search, ScanLine, Plus, CarFront, CircleDot,
   Warehouse, FileText, History, FileSpreadsheet,
-  LayoutDashboard, LogOut, ArrowLeft, RefreshCw
+  LayoutDashboard, LogOut, ArrowLeft, RefreshCw, Pencil, Trash2
 } from 'lucide-react';
 
 const ADMIN_UID = '103ca84c-cb46-440f-a1df-b95c8b1b8e52';
@@ -58,6 +58,8 @@ export default function App() {
   const [dataError, setDataError] = useState('');
   const [form, setForm] = useState({ ...emptyForm });
   const [showForm, setShowForm] = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState('');
 
@@ -146,20 +148,68 @@ export default function App() {
       bemerkung: form.bemerkung.trim() || null
     };
 
-    const { error } = await supabase
-      .from('fahrzeuge')
-      .insert(payload);
+    const query = editingId
+      ? supabase.from('fahrzeuge').update(payload).eq('id', editingId)
+      : supabase.from('fahrzeuge').insert(payload);
 
-    if (error) {
-      setMessage('Fehler beim Speichern: ' + error.message);
+    const { data: changedRows, error } = await query.select('id');
+
+    if (error || !changedRows?.length) {
+      setMessage('Fehler beim Speichern: ' + (error?.message || 'Keine Berechtigung oder Datensatz nicht gefunden.'));
     } else {
+      setEditingId(null);
       setForm({ ...emptyForm });
       setShowForm(false);
-      setMessage('Fahrzeug erfolgreich gespeichert.');
+      setMessage(editingId ? 'Fahrzeug erfolgreich aktualisiert.' : 'Fahrzeug erfolgreich gespeichert.');
       await loadFahrzeuge();
     }
 
     setSaving(false);
+  }
+
+  function startEditingFahrzeug(f: Fahrzeug) {
+    setEditingId(f.id);
+    setForm({
+      kennzeichen: f.kennzeichen || '',
+      vin: f.vin || '',
+      marke: f.marke || '',
+      modell: f.modell || '',
+      kunde_name: f.kunde_name || '',
+      kunde_telefon: f.kunde_telefon || '',
+      bemerkung: f.bemerkung || ''
+    });
+    setMessage('');
+    setShowForm(true);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+
+  async function deleteFahrzeug(f: Fahrzeug) {
+    if (deletingId || saving) return;
+    const kennzeichen = f.kennzeichen || 'Ohne Kennzeichen';
+    if (!window.confirm(`Fahrzeug ${kennzeichen} wirklich löschen?\n\nDieser Vorgang kann nicht rückgängig gemacht werden.`)) return;
+
+    setDeletingId(f.id);
+    setMessage('');
+    const { data, error } = await supabase
+      .from('fahrzeuge')
+      .delete()
+      .eq('id', f.id)
+      .select('id');
+
+    if (error) {
+      setMessage('Löschen nicht möglich: ' + error.message + '. Möglicherweise sind Radsätze mit diesem Fahrzeug verknüpft.');
+    } else if (!data?.length) {
+      setMessage('Löschen nicht möglich: Keine Berechtigung oder Datensatz nicht gefunden.');
+    } else {
+      if (editingId === f.id) {
+        setEditingId(null);
+        setShowForm(false);
+        setForm({ ...emptyForm });
+      }
+      setMessage(`Fahrzeug ${kennzeichen} wurde gelöscht.`);
+      await loadFahrzeuge();
+    }
+    setDeletingId(null);
   }
 
   function changeField(
@@ -344,6 +394,7 @@ export default function App() {
                 setSearch('');
                 setMessage('');
                 setShowForm(false);
+                setEditingId(null);
               }}
               style={{ cursor: 'pointer' }}
             >
@@ -475,6 +526,7 @@ export default function App() {
                   style={buttonStyle}
                   onClick={() => {
                     setShowForm(!showForm);
+                    setEditingId(null);
                     setForm({ ...emptyForm });
                     setMessage('');
                   }}
@@ -503,7 +555,7 @@ export default function App() {
                   marginBottom: 24,
                   border: '1px solid #e2e8f0'
                 }}>
-                  <h2>Neues Fahrzeug</h2>
+                  <h2>{editingId ? 'Fahrzeug bearbeiten' : 'Neues Fahrzeug'}</h2>
 
                   <div style={{
                     display: 'grid',
@@ -565,7 +617,7 @@ export default function App() {
                       marginTop: 18
                     }}
                   >
-                    {saving ? 'Speichern...' : 'Fahrzeug speichern'}
+                    {saving ? 'Speichern...' : editingId ? 'Änderungen speichern' : 'Fahrzeug speichern'}
                   </button>
                 </form>
               )}
@@ -647,6 +699,25 @@ export default function App() {
                           <strong>Bemerkung:</strong> {f.bemerkung}
                         </p>
                       )}
+
+                      <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 16 }}>
+                        <button
+                          type="button"
+                          onClick={() => startEditingFahrzeug(f)}
+                          disabled={saving || !!deletingId}
+                          style={{ ...buttonStyle, display: 'inline-flex', alignItems: 'center', gap: 8 }}
+                        >
+                          <Pencil size={16} /> Bearbeiten
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void deleteFahrzeug(f)}
+                          disabled={saving || !!deletingId}
+                          style={{ ...buttonStyle, background: '#b91c1c', display: 'inline-flex', alignItems: 'center', gap: 8 }}
+                        >
+                          <Trash2 size={16} /> {deletingId === f.id ? 'Löschen...' : 'Löschen'}
+                        </button>
+                      </div>
                     </div>
                   ))}
                 </div>
