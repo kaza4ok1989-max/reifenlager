@@ -1,48 +1,25 @@
-
 import { useEffect, useState } from 'react';
-import type { FormEvent } from 'react';
+import type { FormEvent, CSSProperties } from 'react';
 import type { Session } from '@supabase/supabase-js';
 import { supabase } from './supabase';
 import Einlagerungsschein from './Einlagerungsschein';
 import LagerUebersicht from './LagerUebersicht';
 import ExcelImportExport from './ExcelImportExport';
-import {
-  Search, ScanLine, Plus, CarFront,
-  Warehouse, FileText, History, FileSpreadsheet,
-  LayoutDashboard, LogOut, ArrowLeft, RefreshCw, Pencil, Trash2
-} from 'lucide-react';
+import { Search, Warehouse, FileText, History, FileSpreadsheet, LayoutDashboard, LogOut, ArrowLeft, RefreshCw, Plus } from 'lucide-react';
 
 const ADMIN_UID = '103ca84c-cb46-440f-a1df-b95c8b1b8e52';
-
-type Fahrzeug = {
-  id: string;
-  kennzeichen: string | null;
-  vin: string | null;
-  marke: string | null;
-  modell: string | null;
-  kunde_name: string | null;
-  kunde_telefon: string | null;
-  bemerkung: string | null;
-};
-
-const emptyForm = {
-  kennzeichen: '',
-  vin: '',
-  marke: '',
-  modell: '',
-  kunde_name: '',
-  kunde_telefon: '',
-  bemerkung: ''
-};
-
+type RecordData = Record<string, unknown>;
+type Radsatz = { id: string; kennzeichen: string | null; belegnummer: string | null; lager: string | null; lagerplatz: string | null; daten: RecordData | null; erstellt_am: string | null };
 const menu = [
   { title: 'Dashboard', icon: LayoutDashboard },
-  { title: 'Fahrzeuge', icon: CarFront },
   { title: 'Lagerplan', icon: Warehouse },
   { title: 'Einlagerungsscheine', icon: FileText },
   { title: 'Historie', icon: History },
-  { title: 'Excel Import / Export', icon: FileSpreadsheet }
+  { title: 'Excel Import / Export', icon: FileSpreadsheet },
 ];
+const text = (value: unknown): string => typeof value === 'string' || typeof value === 'number' ? String(value).trim() : '';
+const card: CSSProperties = { background: '#fff', border: '1px solid #dbe3ee', borderRadius: 12, padding: 16 };
+const button: CSSProperties = { border: 0, background: '#12365a', color: '#fff', borderRadius: 8, padding: '10px 14px', cursor: 'pointer', fontWeight: 700 };
 
 export default function App() {
   const [session, setSession] = useState<Session | null>(null);
@@ -51,711 +28,140 @@ export default function App() {
   const [password, setPassword] = useState('');
   const [loginError, setLoginError] = useState('');
   const [signingIn, setSigningIn] = useState(false);
-
   const [page, setPage] = useState(new URLSearchParams(window.location.search).has('qr') ? 'Einlagerungsscheine' : 'Dashboard');
   const [search, setSearch] = useState('');
-  const [fahrzeuge, setFahrzeuge] = useState<Fahrzeug[]>([]);
+  const [radsatzList, setRadsatzList] = useState<Radsatz[]>([]);
   const [dataLoading, setDataLoading] = useState(false);
   const [dataError, setDataError] = useState('');
-  const [form, setForm] = useState({ ...emptyForm });
-  const [showForm, setShowForm] = useState(false);
-  const [editingId, setEditingId] = useState<string | null>(null);
-  const [deletingId, setDeletingId] = useState<string | null>(null);
-  const [saving, setSaving] = useState(false);
-  const [message, setMessage] = useState('');
-
   const isAdmin = session?.user.id === ADMIN_UID;
 
   useEffect(() => {
-    supabase.auth.getSession().then(({ data }) => {
-      setSession(data.session);
-      setLoading(false);
-    });
-
-    const { data: listener } = supabase.auth.onAuthStateChange(
-      (_event, newSession) => {
-        setSession(newSession);
-        setLoading(false);
-      }
-    );
-
+    void supabase.auth.getSession().then(({ data }) => { setSession(data.session); setLoading(false); });
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, newSession) => { setSession(newSession); setLoading(false); });
     return () => listener.subscription.unsubscribe();
   }, []);
 
   useEffect(() => {
-    if (isAdmin) {
-      void loadFahrzeuge();
-    } else {
-      setFahrzeuge([]);
-    }
+    if (!isAdmin) { setRadsatzList([]); return; }
+    void loadRadsaetze();
   }, [isAdmin]);
 
-  async function loadFahrzeuge() {
-    setDataLoading(true);
-    setDataError('');
-
-    const { data, error } = await supabase
-      .from('fahrzeuge')
-      .select('*')
-      .order('erstellt_am', { ascending: false });
-
-    if (error) {
-      setDataError('Fehler beim Laden: ' + error.message);
-    } else {
-      setFahrzeuge((data || []) as Fahrzeug[]);
-    }
-
-    setDataLoading(false);
+  async function loadRadsaetze() {
+    setDataLoading(true); setDataError('');
+    try {
+      const all: Radsatz[] = [];
+      // Supabase may limit a single response; fetch all pages for correct dashboard totals.
+      for (let start = 0; ; start += 1000) {
+        const { data, error } = await supabase.from('reifenlager_scheine')
+          .select('id,kennzeichen,belegnummer,lager,lagerplatz,daten,erstellt_am')
+          .order('erstellt_am', { ascending: false }).range(start, start + 999);
+        if (error) throw error;
+        const batch = (data || []) as Radsatz[];
+        all.push(...batch);
+        if (batch.length < 1000) break;
+      }
+      setRadsatzList(all);
+    } catch (error) { setDataError('Fehler beim Laden: ' + (error instanceof Error ? error.message : String(error))); }
+    finally { setDataLoading(false); }
   }
 
   async function handleLogin(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    setLoginError('');
-    setSigningIn(true);
-
-    const { error } = await supabase.auth.signInWithPassword({
-      email: email.trim(),
-      password
-    });
-
-    if (error) {
-      setLoginError(
-        'Anmeldung fehlgeschlagen. E-Mail und Passwort prüfen.'
-      );
-    }
-
+    event.preventDefault(); setSigningIn(true); setLoginError('');
+    const { error } = await supabase.auth.signInWithPassword({ email: email.trim(), password });
+    if (error) setLoginError('Anmeldung fehlgeschlagen. E-Mail und Passwort prüfen.');
     setSigningIn(false);
   }
-
   async function handleLogout() {
-    await supabase.auth.signOut();
-    setSession(null);
-    setPassword('');
-    setPage('Dashboard');
+    await supabase.auth.signOut(); setSession(null); setPassword(''); setPage('Dashboard');
+  }
+  function navigate(target: string) {
+    setPage(target); setSearch('');
+    if (window.location.search) window.history.replaceState({}, '', `${window.location.origin}${window.location.pathname}`);
+    if (target === 'Dashboard') void loadRadsaetze();
+  }
+  function openSchein(id: string) {
+    const url = `${window.location.origin}${import.meta.env.BASE_URL}?qr=${encodeURIComponent(id)}`;
+    window.location.assign(url);
   }
 
-  async function saveFahrzeug(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    setMessage('');
-    setSaving(true);
+  const query = search.trim().toLocaleLowerCase();
+  const filtered = query ? radsatzList.filter(r => {
+    const d = r.daten || {};
+    return [r.kennzeichen, r.belegnummer, r.lager, r.lagerplatz,
+      d.fahrzeug, d.vin, d.fin, d.fahrgestellnummer, d.kundenname,
+      d.reifengroesse, d.reifenmarke, d.reifenbezeichnung, d.saison,
+      d.bemerkung, d.fahrzeugstandort, d.auto, d.marke, d.modell,
+      ...Object.values(d).filter(v => typeof v === 'string' || typeof v === 'number')]
+      .map(text).join(' ').toLocaleLowerCase().includes(query);
+  }) : [];
+  const assigned = radsatzList.filter(r => (r.lager === 'Zelt' || r.lager === 'Lager') && !!text(r.lagerplatz));
+  const zelt = assigned.filter(r => r.lager === 'Zelt').length;
+  const lager = assigned.filter(r => r.lager === 'Lager').length;
+  const stats = [
+    ['Radsätze gesamt', radsatzList.length],
+    ['Im Lager', assigned.length],
+    ['Zelt', zelt],
+    ['Lager', lager],
+    ['Nicht zugeordnet', radsatzList.length - assigned.length],
+  ] as const;
 
-    const payload = {
-      kennzeichen: form.kennzeichen.trim().toUpperCase(),
-      vin: form.vin.trim().toUpperCase() || null,
-      marke: form.marke.trim() || null,
-      modell: form.modell.trim() || null,
-      kunde_name: form.kunde_name.trim() || null,
-      kunde_telefon: form.kunde_telefon.trim() || null,
-      bemerkung: form.bemerkung.trim() || null
-    };
+  if (loading) return <div style={{ padding: 40, textAlign: 'center' }}>BESICO Reifenlager wird geladen...</div>;
+  if (!isAdmin) return <div className="app">
+    <header className="header"><div className="brand"><span className="brand-symbol">B</span><div><strong>BESICO</strong><small>REIFENLAGER</small></div></div><span className="header-label">Lagerverwaltung</span></header>
+    <main style={{ minHeight: '75vh', display: 'flex', justifyContent: 'center', alignItems: 'center', padding: 20 }}>
+      <form onSubmit={handleLogin} style={{ ...card, width: '100%', maxWidth: 400, padding: 30 }}>
+        <h1>Anmeldung</h1><p>Bitte mit Ihrem Administratorkonto anmelden.</p>
+        {session && <p style={{ color: '#b91c1c' }}>Dieses Konto hat keinen Administratorzugang.</p>}
+        <label htmlFor="email">E-Mail</label><input id="email" type="email" required value={email} onChange={e => setEmail(e.target.value)} autoComplete="username" style={{ width: '100%', boxSizing: 'border-box', padding: 12, margin: '8px 0 18px' }} />
+        <label htmlFor="password">Passwort</label><input id="password" type="password" required value={password} onChange={e => setPassword(e.target.value)} autoComplete="current-password" style={{ width: '100%', boxSizing: 'border-box', padding: 12, margin: '8px 0 18px' }} />
+        {loginError && <p role="alert" style={{ color: '#b91c1c' }}>{loginError}</p>}
+        <button type="submit" disabled={signingIn || !!session} style={button}>{signingIn ? 'Bitte warten...' : 'Anmelden'}</button>
+        {session && <button type="button" onClick={() => void handleLogout()} style={{ marginLeft: 12 }}>Anderes Konto</button>}
+      </form>
+    </main>
+  </div>;
 
-    const query = editingId
-      ? supabase.from('fahrzeuge').update(payload).eq('id', editingId)
-      : supabase.from('fahrzeuge').insert(payload);
-
-    const { data: changedRows, error } = await query.select('id');
-
-    if (error || !changedRows?.length) {
-      setMessage('Fehler beim Speichern: ' + (error?.message || 'Keine Berechtigung oder Datensatz nicht gefunden.'));
-    } else {
-      setEditingId(null);
-      setForm({ ...emptyForm });
-      setShowForm(false);
-      setMessage(editingId ? 'Fahrzeug erfolgreich aktualisiert.' : 'Fahrzeug erfolgreich gespeichert.');
-      await loadFahrzeuge();
-    }
-
-    setSaving(false);
-  }
-
-  function startEditingFahrzeug(f: Fahrzeug) {
-    setEditingId(f.id);
-    setForm({
-      kennzeichen: f.kennzeichen || '',
-      vin: f.vin || '',
-      marke: f.marke || '',
-      modell: f.modell || '',
-      kunde_name: f.kunde_name || '',
-      kunde_telefon: f.kunde_telefon || '',
-      bemerkung: f.bemerkung || ''
-    });
-    setMessage('');
-    setShowForm(true);
-    window.scrollTo({ top: 0, behavior: 'smooth' });
-  }
-
-  async function deleteFahrzeug(f: Fahrzeug) {
-    if (deletingId || saving) return;
-    const kennzeichen = f.kennzeichen || 'Ohne Kennzeichen';
-    if (!window.confirm(`Fahrzeug ${kennzeichen} wirklich löschen?\n\nDieser Vorgang kann nicht rückgängig gemacht werden.`)) return;
-
-    setDeletingId(f.id);
-    setMessage('');
-    const { data, error } = await supabase
-      .from('fahrzeuge')
-      .delete()
-      .eq('id', f.id)
-      .select('id');
-
-    if (error) {
-      setMessage('Löschen nicht möglich: ' + error.message + '. Möglicherweise sind Radsätze mit diesem Fahrzeug verknüpft.');
-    } else if (!data?.length) {
-      setMessage('Löschen nicht möglich: Keine Berechtigung oder Datensatz nicht gefunden.');
-    } else {
-      if (editingId === f.id) {
-        setEditingId(null);
-        setShowForm(false);
-        setForm({ ...emptyForm });
-      }
-      setMessage(`Fahrzeug ${kennzeichen} wurde gelöscht.`);
-      await loadFahrzeuge();
-    }
-    setDeletingId(null);
-  }
-
-  function changeField(
-    field: keyof typeof emptyForm,
-    value: string
-  ) {
-    setForm((previous) => ({
-      ...previous,
-      [field]: value
-    }));
-  }
-
-  const filteredFahrzeuge = fahrzeuge.filter((f) => {
-    const text = [
-      f.kennzeichen,
-      f.vin,
-      f.marke,
-      f.modell,
-      f.kunde_name
-    ].join(' ').toLowerCase();
-
-    return text.includes(search.toLowerCase().trim());
-  });
-
-  const inputStyle = {
-    width: '100%',
-    padding: 12,
-    border: '1px solid #cbd5e1',
-    borderRadius: 8,
-    boxSizing: 'border-box' as const,
-    fontSize: 14
-  };
-
-  const buttonStyle = {
-    padding: '11px 18px',
-    background: '#12365a',
-    color: 'white',
-    border: 'none',
-    borderRadius: 8,
-    cursor: 'pointer',
-    fontWeight: 700 as const
-  };
-
-  if (loading) {
-    return (
-      <div style={{ padding: 40, textAlign: 'center' }}>
-        BESICO Reifenlager wird geladen...
-      </div>
-    );
-  }
-
-  if (!isAdmin) {
-    return (
-      <div className="app">
-        <header className="header">
-          <div className="brand">
-            <span className="brand-symbol">B</span>
-            <div>
-              <strong>BESICO</strong>
-              <small>REIFENLAGER</small>
-            </div>
+  return <div className="app">
+    <header className="header"><div className="brand"><span className="brand-symbol">B</span><div><strong>BESICO</strong><small>REIFENLAGER</small></div></div><span className="header-label">Lagerverwaltung</span>
+      <button onClick={() => void handleLogout()} style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8, padding: '9px 14px', borderRadius: 8, border: '1px solid #94a3b8', background: 'transparent', color: 'inherit', cursor: 'pointer' }}><LogOut size={18} /> Abmelden</button>
+    </header>
+    <div className="layout">
+      <aside className="sidebar">{menu.map(({ title, icon: Icon }) => <div key={title} className={'nav-item' + (page === title ? ' active' : '')} onClick={() => navigate(title)} style={{ cursor: 'pointer' }}><Icon size={20} /><span>{title}</span></div>)}</aside>
+      <main className="content">
+        {page === 'Dashboard' && <>
+          <div className="welcome"><h1>Reifenlager</h1><p>Radsätze und Lagerplätze verwalten</p></div>
+          <div className="search-box"><Search size={24} /><input value={search} onChange={e => setSearch(e.target.value)} placeholder="Kennzeichen, FIN, Fahrzeug, Reifen oder Lagerplatz suchen..." /></div>
+          <div className="quick-actions">
+            <div className="action-card" onClick={() => navigate('Einlagerungsscheine')} style={{ cursor: 'pointer' }}><Plus size={28} /><strong>Neuer Radsatz</strong></div>
+            <div className="action-card" onClick={() => navigate('Lagerplan')} style={{ cursor: 'pointer' }}><Warehouse size={28} /><strong>Lagerplan</strong></div>
+            <div className="action-card" onClick={() => void loadRadsaetze()} style={{ cursor: 'pointer' }}><RefreshCw size={28} /><strong>Aktualisieren</strong></div>
           </div>
-          <span className="header-label">Lagerverwaltung</span>
-        </header>
-
-        <main style={{
-          minHeight: '75vh',
-          display: 'flex',
-          justifyContent: 'center',
-          alignItems: 'center',
-          padding: 20
-        }}>
-          <form onSubmit={handleLogin} style={{
-            width: '100%',
-            maxWidth: 400,
-            padding: 30,
-            background: 'white',
-            borderRadius: 16,
-            boxShadow: '0 8px 30px rgba(0,0,0,0.08)'
-          }}>
-            <h1>Anmeldung</h1>
-            <p>Bitte mit Ihrem Administratorkonto anmelden.</p>
-
-            {session && (
-              <p style={{ color: '#b91c1c' }}>
-                Dieses Konto hat keinen Administratorzugang.
-              </p>
-            )}
-
-            <label htmlFor="email">E-Mail</label>
-            <input
-              id="email"
-              type="email"
-              required
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              autoComplete="username"
-              style={{ ...inputStyle, margin: '8px 0 18px' }}
-            />
-
-            <label htmlFor="password">Passwort</label>
-            <input
-              id="password"
-              type="password"
-              required
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              autoComplete="current-password"
-              style={{ ...inputStyle, margin: '8px 0 18px' }}
-            />
-
-            {loginError && (
-              <p role="alert" style={{ color: '#b91c1c' }}>
-                {loginError}
-              </p>
-            )}
-
-            <button
-              type="submit"
-              disabled={signingIn || !!session}
-              style={buttonStyle}
-            >
-              {signingIn ? 'Bitte warten...' : 'Anmelden'}
-            </button>
-
-            {session && (
-              <button
-                type="button"
-                onClick={handleLogout}
-                style={{ marginLeft: 12 }}
-              >
-                Anderes Konto
-              </button>
-            )}
-          </form>
-        </main>
-      </div>
-    );
-  }
-
-  return (
-    <div className="app">
-      <header className="header">
-        <div className="brand">
-          <span className="brand-symbol">B</span>
-          <div>
-            <strong>BESICO</strong>
-            <small>REIFENLAGER</small>
-          </div>
-        </div>
-
-        <span className="header-label">Lagerverwaltung</span>
-
-        <button onClick={handleLogout} style={{
-          marginLeft: 'auto',
-          display: 'flex',
-          alignItems: 'center',
-          gap: 8,
-          padding: '9px 14px',
-          borderRadius: 8,
-          border: '1px solid #94a3b8',
-          background: 'transparent',
-          color: 'inherit',
-          cursor: 'pointer'
-        }}>
-          <LogOut size={18} />
-          Abmelden
-        </button>
-      </header>
-
-      <div className="layout">
-        <aside className="sidebar">
-          {menu.map(({ title, icon: Icon }) => (
-            <div
-              className={
-                'nav-item' +
-                (page === title ? ' active' : '')
-              }
-              key={title}
-              onClick={() => {
-                setPage(title);
-                setSearch('');
-                setMessage('');
-                setShowForm(false);
-                setEditingId(null);
-              }}
-              style={{ cursor: 'pointer' }}
-            >
-              <Icon size={20} />
-              <span>{title}</span>
-            </div>
-          ))}
-        </aside>
-
-        <main className="content">
-          {page === 'Dashboard' && (
-            <>
-              <div className="welcome">
-                <h1>Reifenlager</h1>
-                <p>
-                  Fahrzeuge, Radsätze und Lagerplätze verwalten
-                </p>
-              </div>
-
-              <div className="search-box">
-                <Search size={24} />
-                <input
-                  value={search}
-                  onChange={(e) => setSearch(e.target.value)}
-                  placeholder="Kennzeichen, FIN oder Kunde suchen..."
-                />
-              </div>
-
-              <div className="quick-actions">
-                <div className="action-card">
-                  <ScanLine size={28} />
-                  <strong>QR scannen</strong>
+          <h2>Übersicht</h2>
+          <div className="stats">{stats.map(([name, count]) => <div className="stat-card" key={name}><span>{name}</span><strong>{dataLoading ? '...' : count}</strong></div>)}</div>
+          {dataError && <p role="alert" style={{ color: '#b91c1c' }}>{dataError}</p>}
+          {!!query && <section style={{ marginTop: 24 }}><h2>Suchergebnisse Radsätze ({filtered.length})</h2>
+            {dataLoading && <p>Radsätze werden geladen...</p>}
+            {!dataLoading && filtered.length === 0 && <p>Keine Radsätze gefunden.</p>}
+            <div style={{ display: 'grid', gap: 10 }}>{filtered.map(r => {
+              const d = r.daten || {};
+              const location = r.lager && r.lagerplatz ? `${r.lager} · ${r.lagerplatz}` : 'Nicht zugeordnet';
+              return <div key={r.id} style={card}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}><strong>{r.kennzeichen || 'Ohne Kennzeichen'}</strong><span style={{ color: '#9a3412' }}>{location}</span></div>
+                <p style={{ margin: '8px 0', color: '#475569' }}>{[text(d.fahrzeug), text(d.saison), text(d.reifengroesse), text(d.reifenmarke)].filter(Boolean).join(' · ') || text(r.belegnummer)}</p>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                  <button type="button" style={button} onClick={() => openSchein(r.id)}>Schein / QR öffnen</button>
+                  <button type="button" style={{ ...button, background: '#e2e8f0', color: '#12365a' }} onClick={() => navigate('Lagerplan')}>Lagerplan öffnen</button>
                 </div>
-                <div
-                  className="action-card"
-                  onClick={() => setPage('Lagerplan')}
-                  style={{ cursor: 'pointer' }}
-                >
-                  <Plus size={28} />
-                  <strong>Neuer Radsatz</strong>
-                </div>
-                <div
-                  className="action-card"
-                  onClick={() => setPage('Fahrzeuge')}
-                  style={{ cursor: 'pointer' }}
-                >
-                  <CarFront size={28} />
-                  <strong>Fahrzeuge</strong>
-                </div>
-                <div
-                  className="action-card"
-                  onClick={() => setPage('Lagerplan')}
-                  style={{ cursor: 'pointer' }}
-                >
-                  <Warehouse size={28} />
-                  <strong>Lagerplan</strong>
-                </div>
-              </div>
-
-              <h2>Übersicht</h2>
-
-              <div className="stats">
-                {[
-                  ['Fahrzeuge', dataLoading ? '...' : String(fahrzeuge.length)],
-                  ['Radsätze', '—'],
-                  ['Im Lager', '—'],
-                  ['Am Fahrzeug', '—'],
-                  ['Ohne Fahrzeug', '—'],
-                  ['Standort unbekannt', '—']
-                ].map(([name, value]) => (
-                  <div className="stat-card" key={name}>
-                    <span>{name}</span>
-                    <strong>{value}</strong>
-                  </div>
-                ))}
-              </div>
-
-              {dataError && (
-                <p style={{ color: '#b91c1c' }}>{dataError}</p>
-              )}
-
-              {search && (
-                <div style={{ marginTop: 24 }}>
-                  <h2>Suchergebnisse Fahrzeuge</h2>
-                  {filteredFahrzeuge.map((f) => (
-                    <div key={f.id} style={{
-                      padding: 14,
-                      background: 'white',
-                      borderRadius: 8,
-                      marginBottom: 8
-                    }}>
-                      <strong>{f.kennzeichen || 'Ohne Kennzeichen'}</strong>
-                      {' — '}
-                      {f.marke} {f.modell}
-                      {' — '}
-                      {f.kunde_name}
-                    </div>
-                  ))}
-                  {filteredFahrzeuge.length === 0 && (
-                    <p>Keine Fahrzeuge gefunden.</p>
-                  )}
-                </div>
-              )}
-
-              <div className="notice">
-                <strong>Datenbank verbunden</strong>
-                <p>
-                  Fahrzeugdaten werden aus Supabase geladen.
-                  Weitere Funktionen folgen.
-                </p>
-              </div>
-            </>
-          )}
-
-          {page === 'Fahrzeuge' && (
-            <>
-              <div className="welcome">
-                <h1>Fahrzeuge</h1>
-                <p>Fahrzeuge und Kundendaten verwalten</p>
-              </div>
-
-              <div style={{
-                display: 'flex',
-                gap: 12,
-                flexWrap: 'wrap',
-                marginBottom: 20
-              }}>
-                <button
-                  style={buttonStyle}
-                  onClick={() => {
-                    setShowForm(!showForm);
-                    setEditingId(null);
-                    setForm({ ...emptyForm });
-                    setMessage('');
-                  }}
-                >
-                  {showForm ? 'Abbrechen' : '+ Neues Fahrzeug'}
-                </button>
-
-                <button
-                  style={{
-                    ...buttonStyle,
-                    background: '#e2e8f0',
-                    color: '#12365a'
-                  }}
-                  onClick={() => void loadFahrzeuge()}
-                >
-                  <RefreshCw size={16} />
-                  {' '}Aktualisieren
-                </button>
-              </div>
-
-              {showForm && (
-                <form onSubmit={saveFahrzeug} style={{
-                  padding: 24,
-                  background: 'white',
-                  borderRadius: 14,
-                  marginBottom: 24,
-                  border: '1px solid #e2e8f0'
-                }}>
-                  <h2>{editingId ? 'Fahrzeug bearbeiten' : 'Neues Fahrzeug'}</h2>
-
-                  <div style={{
-                    display: 'grid',
-                    gridTemplateColumns:
-                      'repeat(auto-fit, minmax(220px, 1fr))',
-                    gap: 16
-                  }}>
-                    {([
-                      ['kennzeichen', 'Kennzeichen *'],
-                      ['vin', 'FIN / VIN'],
-                      ['marke', 'Marke'],
-                      ['modell', 'Modell'],
-                      ['kunde_name', 'Kundenname'],
-                      ['kunde_telefon', 'Telefon']
-                    ] as const).map(([field, label]) => (
-                      <label key={field}>
-                        <span style={{
-                          display: 'block',
-                          marginBottom: 7
-                        }}>
-                          {label}
-                        </span>
-                        <input
-                          required={field === 'kennzeichen'}
-                          value={form[field]}
-                          onChange={(e) =>
-                            changeField(field, e.target.value)
-                          }
-                          style={inputStyle}
-                        />
-                      </label>
-                    ))}
-                  </div>
-
-                  <label style={{
-                    display: 'block',
-                    marginTop: 16
-                  }}>
-                    Bemerkung
-                    <textarea
-                      value={form.bemerkung}
-                      onChange={(e) =>
-                        changeField('bemerkung', e.target.value)
-                      }
-                      rows={3}
-                      style={{
-                        ...inputStyle,
-                        display: 'block',
-                        marginTop: 8
-                      }}
-                    />
-                  </label>
-
-                  <button
-                    type="submit"
-                    disabled={saving}
-                    style={{
-                      ...buttonStyle,
-                      marginTop: 18
-                    }}
-                  >
-                    {saving ? 'Speichern...' : editingId ? 'Änderungen speichern' : 'Fahrzeug speichern'}
-                  </button>
-                </form>
-              )}
-
-              {message && (
-                <p role="status" style={{
-                  padding: 14,
-                  background: 'white',
-                  borderRadius: 8
-                }}>
-                  {message}
-                </p>
-              )}
-
-              <div className="search-box">
-                <Search size={22} />
-                <input
-                  value={search}
-                  onChange={(e) => setSearch(e.target.value)}
-                  placeholder="Kennzeichen, FIN, Marke oder Kunde suchen..."
-                />
-              </div>
-
-              {dataError && (
-                <p style={{ color: '#b91c1c' }}>
-                  {dataError}
-                </p>
-              )}
-
-              <h2>
-                Fahrzeugliste ({filteredFahrzeuge.length})
-              </h2>
-
-              {dataLoading ? (
-                <p>Fahrzeuge werden geladen...</p>
-              ) : filteredFahrzeuge.length === 0 ? (
-                <div className="notice">
-                  <strong>Keine Fahrzeuge gefunden</strong>
-                  <p>
-                    Klicken Sie auf „Neues Fahrzeug“,
-                    um das erste Fahrzeug anzulegen.
-                  </p>
-                </div>
-              ) : (
-                <div style={{
-                  display: 'grid',
-                  gap: 12
-                }}>
-                  {filteredFahrzeuge.map((f) => (
-                    <div key={f.id} style={{
-                      padding: 20,
-                      background: 'white',
-                      borderRadius: 12,
-                      border: '1px solid #e2e8f0'
-                    }}>
-                      <div style={{
-                        display: 'flex',
-                        justifyContent: 'space-between',
-                        flexWrap: 'wrap',
-                        gap: 10
-                      }}>
-                        <strong style={{ fontSize: 20 }}>
-                          {f.kennzeichen || 'Ohne Kennzeichen'}
-                        </strong>
-                        <span>{f.marke} {f.modell}</span>
-                      </div>
-
-                      <p style={{ marginBottom: 5 }}>
-                        <strong>FIN:</strong> {f.vin || '—'}
-                      </p>
-                      <p style={{ marginBottom: 5 }}>
-                        <strong>Kunde:</strong> {f.kunde_name || '—'}
-                      </p>
-                      <p style={{ marginBottom: 5 }}>
-                        <strong>Telefon:</strong> {f.kunde_telefon || '—'}
-                      </p>
-                      {f.bemerkung && (
-                        <p>
-                          <strong>Bemerkung:</strong> {f.bemerkung}
-                        </p>
-                      )}
-
-                      <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 16 }}>
-                        <button
-                          type="button"
-                          onClick={() => startEditingFahrzeug(f)}
-                          disabled={saving || !!deletingId}
-                          style={{ ...buttonStyle, display: 'inline-flex', alignItems: 'center', gap: 8 }}
-                        >
-                          <Pencil size={16} /> Bearbeiten
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => void deleteFahrzeug(f)}
-                          disabled={saving || !!deletingId}
-                          style={{ ...buttonStyle, background: '#b91c1c', display: 'inline-flex', alignItems: 'center', gap: 8 }}
-                        >
-                          <Trash2 size={16} /> {deletingId === f.id ? 'Löschen...' : 'Löschen'}
-                        </button>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </>
-          )}
-
-          {page === 'Lagerplan' && <LagerUebersicht view="Lagerplan" />}
-
-          {page === 'Einlagerungsscheine' && <Einlagerungsschein />}
-
-          {page === 'Excel Import / Export' && <ExcelImportExport />}
-
-          {page !== 'Dashboard' && page !== 'Fahrzeuge' && page !== 'Einlagerungsscheine' && page !== 'Lagerplan' && page !== 'Excel Import / Export' && (
-            <>
-              <button
-                onClick={() => setPage('Dashboard')}
-                style={{
-                  ...buttonStyle,
-                  background: '#e2e8f0',
-                  color: '#12365a'
-                }}
-              >
-                <ArrowLeft size={16} />
-                {' '}Dashboard
-              </button>
-
-              <div className="welcome" style={{ marginTop: 24 }}>
-                <h1>{page}</h1>
-                <p>
-                  Dieser Bereich wird im nächsten Schritt eingerichtet.
-                </p>
-              </div>
-            </>
-          )}
-        </main>
-      </div>
+              </div>;
+            })}</div>
+          </section>}
+          <div className="notice" style={{ marginTop: 20 }}><strong>Datenbank verbunden</strong><p>Radsätze werden aus Supabase geladen. Die Zahlen beziehen sich auf gespeicherte Radsätze.</p></div>
+        </>}
+        {page === 'Lagerplan' && <LagerUebersicht view="Lagerplan" />}
+        {page === 'Einlagerungsscheine' && <Einlagerungsschein />}
+        {page === 'Excel Import / Export' && <ExcelImportExport />}
+        {page === 'Historie' && <><button type="button" style={{ ...button, background: '#e2e8f0', color: '#12365a' }} onClick={() => navigate('Dashboard')}><ArrowLeft size={16} /> Dashboard</button><div className="welcome" style={{ marginTop: 24 }}><h1>Historie</h1><p>Dieser Bereich wird im nächsten Schritt eingerichtet.</p></div></>}
+      </main>
     </div>
-  );
+  </div>;
 }
