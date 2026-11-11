@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import type { ChangeEvent, CSSProperties } from 'react';
 import * as XLSX from 'xlsx';
+import ExcelJS from 'exceljs';
 import { supabase } from './supabase';
 
 type CellRow = Record<string, unknown>;
@@ -13,6 +14,25 @@ const style: CSSProperties = { background: '#fff', border: '1px solid #dbe3ee', 
 const button: CSSProperties = { border: '1px solid #12365a', borderRadius: 8, padding: '10px 14px', background: '#12365a', color: '#fff', cursor: 'pointer', fontWeight: 700 };
 const text = (v: unknown) => String(v ?? '').trim();
 const normalize = (v: unknown) => text(v).toUpperCase().replace(/\s+/g, '');
+const pick = (d: CellRow, ...keys: string[]) => { for (const key of keys) { const value = text(d[key]); if (value) return value; } return ''; };
+const dateGerman = (value: unknown) => {
+  const s = text(value);
+  if (!s) return '';
+  const date = new Date(s);
+  return Number.isNaN(date.getTime()) ? s : new Intl.DateTimeFormat('de-DE', { timeZone: 'Europe/Berlin', day: '2-digit', month: '2-digit', year: 'numeric' }).format(date);
+};
+const headers = ['Nr.', 'Bereich', 'Lagerplatz', 'Kennzeichen / Lagerschein', 'Fahrgestellnummer / Auto', 'Datum', 'Reifengröße', 'Radart', 'Reifenbezeichnung', 'Fahrzeugstandort'];
+
+function downloadBlob(blob: Blob, name: string) {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = name;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
 
 export default function ExcelImportExport() {
   const [kind, setKind] = useState<Kind>('Fahrzeuge');
@@ -22,24 +42,92 @@ export default function ExcelImportExport() {
   const [working, setWorking] = useState(false);
   const [filename, setFilename] = useState('');
 
+  async function fetchData() {
+    const [vehicles, receipts] = await Promise.all([
+      supabase.from('fahrzeuge').select('kennzeichen,vin,marke,modell,kunde_name,kunde_telefon,bemerkung').order('kennzeichen').limit(10000),
+      supabase.from('reifenlager_scheine').select('belegnummer,kennzeichen,lager,lagerplatz,daten,erstellt_am').order('erstellt_am', { ascending: false }).limit(10000),
+    ]);
+    if (vehicles.error || receipts.error) throw new Error(vehicles.error?.message || receipts.error?.message);
+    return { vehicles: (vehicles.data || []) as CellRow[], receipts: (receipts.data || []) as CellRow[] };
+  }
+
   async function exportExcel() {
     setWorking(true); setStatus(''); setErrors([]);
     try {
-      const [vehicles, receipts] = await Promise.all([
-        supabase.from('fahrzeuge').select('kennzeichen,vin,marke,modell,kunde_name,kunde_telefon,bemerkung').order('kennzeichen'),
-        supabase.from('reifenlager_scheine').select('belegnummer,kennzeichen,lager,lagerplatz,daten,erstellt_am').order('erstellt_am', { ascending: false }),
-      ]);
-      if (vehicles.error || receipts.error) throw new Error(vehicles.error?.message || receipts.error?.message);
-      const v = (vehicles.data || []).map(r => Object.fromEntries(columns.Fahrzeuge.map(k => [k, (r as CellRow)[k] ?? ''])));
-      const r = (receipts.data || []).map(item => {
+      const { vehicles, receipts } = await fetchData();
+      const v = vehicles.map(r => Object.fromEntries(columns.Fahrzeuge.map(k => [k, r[k] ?? ''])));
+      const r = receipts.map(item => {
         const data = (item.daten && typeof item.daten === 'object' ? item.daten : {}) as CellRow;
-        return Object.fromEntries(columns.Radsaetze.map(k => [k, ['kundenname', 'fahrzeug', 'saison'].includes(k) ? data[k] ?? '' : (item as unknown as CellRow)[k] ?? '']));
+        return Object.fromEntries(columns.Radsaetze.map(k => [k, ['kundenname', 'fahrzeug', 'saison'].includes(k) ? data[k] ?? '' : item[k] ?? '']));
       });
       const wb = XLSX.utils.book_new();
       XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(v, { header: columns.Fahrzeuge }), 'Fahrzeuge');
       XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(r, { header: columns.Radsaetze }), 'Radsaetze');
-      XLSX.writeFile(wb, `BESICO_Reifenlager_${new Date().toISOString().slice(0, 10)}.xlsx`);
-      setStatus(`Excel exportiert: ${v.length} Fahrzeuge, ${r.length} Radsätze.`);
+      XLSX.writeFile(wb, `BESICO_Backup_${new Date().toISOString().slice(0, 10)}.xlsx`);
+      setStatus(`Vollständiger Export: ${v.length} Fahrzeuge, ${r.length} Radsätze.`);
+    } catch (e) { setErrors([e instanceof Error ? e.message : String(e)]); }
+    finally { setWorking(false); }
+  }
+
+  async function exportLagerliste() {
+    setWorking(true); setStatus(''); setErrors([]);
+    try {
+      const { vehicles, receipts } = await fetchData();
+      const byPlate = new Map(vehicles.map(v => [normalize(v.kennzeichen), v]));
+      const wb = new ExcelJS.Workbook();
+      wb.creator = 'BESICO Reifenlager';
+      const sheet = wb.addWorksheet('Lagerliste', {
+        views: [{ state: 'frozen', ySplit: 1 }],
+        pageSetup: { paperSize: 9, orientation: 'landscape', fitToPage: true, fitToWidth: 1, fitToHeight: 0, horizontalCentered: true },
+        properties: { defaultRowHeight: 26 },
+      });
+      sheet.columns = [
+        { width: 7 }, { width: 15 }, { width: 15 }, { width: 27 }, { width: 37 },
+        { width: 15 }, { width: 26 }, { width: 14 }, { width: 33 }, { width: 35 },
+      ];
+      const heading = sheet.addRow(headers);
+      heading.height = 37;
+      heading.eachCell(cell => {
+        cell.font = { bold: true, color: { argb: 'FFFFFFFF' }, size: 10 };
+        cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF17212B' } };
+        cell.alignment = { vertical: 'middle', horizontal: 'left', wrapText: true };
+        cell.border = { top: { style: 'thin', color: { argb: 'FF333333' } }, bottom: { style: 'thin', color: { argb: 'FF333333' } }, left: { style: 'thin', color: { argb: 'FF333333' } }, right: { style: 'thin', color: { argb: 'FF333333' } } };
+      });
+      // Keep all records, including unassigned sets, so none disappear from the inventory.
+      const sorted = [...receipts].sort((a, b) =>
+        `${text(a.lager)} ${text(a.lagerplatz)} ${text(a.kennzeichen)}`.localeCompare(`${text(b.lager)} ${text(b.lagerplatz)} ${text(b.kennzeichen)}`, 'de', { numeric: true })
+      );
+      sorted.forEach((item, i) => {
+        const data = (item.daten && typeof item.daten === 'object' ? item.daten : {}) as CellRow;
+        const vehicle = byPlate.get(normalize(item.kennzeichen));
+        const vin = pick(data, 'vin', 'fahrgestellnummer', 'fin') || text(vehicle?.vin);
+        const auto = pick(data, 'fahrzeug', 'auto', 'fahrzeugmodell') || [text(vehicle?.marke), text(vehicle?.modell)].filter(Boolean).join(' ');
+        const plate = text(item.kennzeichen);
+        const receipt = text(item.belegnummer);
+        const tyreSize = pick(data, 'reifengroesse', 'reifengröße', 'reifengroesse_vorne', 'reifengroesse_hinten', 'reifengroesse_va', 'reifengroesse_ha', 'reifen_groesse', 'groesse', 'dimension');
+        const tyreName = pick(data, 'reifenbezeichnung', 'reifenmarke', 'reifenhersteller', 'reifenmodell', 'reifenprofil', 'hersteller', 'marke');
+        const note = pick(data, 'fahrzeugstandort', 'standort', 'bemerkung', 'notiz', 'hinweis') || text(vehicle?.bemerkung);
+        const row = sheet.addRow([
+          i + 1, text(item.lager) || 'Nicht zugeordnet', text(item.lagerplatz),
+          [plate, receipt && receipt !== plate ? `Beleg: ${receipt}` : ''].filter(Boolean).join(' / '),
+          [vin, auto].filter(Boolean).join(' / '), dateGerman(item.erstellt_am), tyreSize,
+          pick(data, 'saison', 'radart', 'reifenart'), tyreName, note,
+        ]);
+        row.height = 34;
+        const highlight = /verkauft|reserviert|abgeholt|achtung|prüfen|pruefen|wechsel/i.test(note);
+        row.eachCell({ includeEmpty: true }, cell => {
+          cell.font = { size: 10, color: { argb: 'FF202020' } };
+          cell.alignment = { vertical: 'middle', wrapText: true };
+          cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: highlight ? 'FFFFC36A' : i % 2 ? 'FFF1F5F9' : 'FFFFFFFF' } };
+          cell.border = { top: { style: 'thin', color: { argb: 'FF555555' } }, bottom: { style: 'thin', color: { argb: 'FF555555' } }, left: { style: 'thin', color: { argb: 'FF555555' } }, right: { style: 'thin', color: { argb: 'FF555555' } } };
+        });
+      });
+      sheet.autoFilter = { from: 'A1', to: 'J1' };
+      sheet.pageSetup.printTitlesRow = '1:1';
+      sheet.pageSetup.margins = { left: 0.2, right: 0.2, top: 0.35, bottom: 0.35, header: 0.15, footer: 0.15 };
+      const bytes = await wb.xlsx.writeBuffer();
+      downloadBlob(new Blob([bytes as BlobPart], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), `BESICO_Lagerliste_${new Date().toISOString().slice(0, 10)}.xlsx`);
+      setStatus(`Lagerliste erstellt: ${sorted.length} Radsätze. Leere Felder bedeuten, dass die Angaben nicht gespeichert sind.`);
     } catch (e) { setErrors([e instanceof Error ? e.message : String(e)]); }
     finally { setWorking(false); }
   }
@@ -58,7 +146,7 @@ export default function ExcelImportExport() {
       if (rows.length > 2000) throw new Error('Bitte maximal 2000 Zeilen auf einmal importieren.');
       const required = kind === 'Fahrzeuge' ? ['kennzeichen'] : ['belegnummer', 'kennzeichen'];
       const missing = required.filter(c => !Object.keys(rows[0]).includes(c));
-      if (missing.length) throw new Error(`Fehlende Spalten: ${missing.join(', ')}. Bitte die Vorlage exportieren und verwenden.`);
+      if (missing.length) throw new Error(`Fehlende Spalten: ${missing.join(', ')}. Bitte den vollständigen Backup-Export als Vorlage verwenden.`);
       setPreview(rows);
       setStatus(`${rows.length} Zeilen eingelesen. Bitte Vorschau prüfen. Noch nichts gespeichert.`);
     } catch (e) { setErrors([e instanceof Error ? e.message : String(e)]); }
@@ -93,7 +181,6 @@ export default function ExcelImportExport() {
           const row = preview[i], number = text(row.belegnummer), plate = normalize(row.kennzeichen);
           if (!number || !plate) { issues.push(`Zeile ${i + 2}: Belegnummer oder Kennzeichen fehlt.`); continue; }
           if (seen.has(normalize(number))) { skipped++; continue; }
-          // New records start unassigned: importing must never overwrite an occupied storage slot.
           const payload = { belegnummer: number, kennzeichen: plate, lager: '', lagerplatz: '', daten: { kundenname: text(row.kundenname), fahrzeug: text(row.fahrzeug), saison: text(row.saison) } };
           const { error } = await supabase.from('reifenlager_scheine').insert(payload);
           if (error) issues.push(`Zeile ${i + 2}: ${error.message}`);
@@ -109,15 +196,20 @@ export default function ExcelImportExport() {
 
   return <section style={{ maxWidth: 1100 }}>
     <h1>Excel Import / Export</h1>
-    <p style={{ color: '#64748b' }}>Fahrzeuge und Radsätze als Excel-Datei sichern oder neue Einträge importieren.</p>
+    <p style={{ color: '#64748b' }}>Lagerliste wie auf dem Foto ausgeben, vollständige Daten sichern oder neue Einträge importieren.</p>
     <div style={style}>
-      <h2>Excel Export</h2>
-      <p>Exportiert beide Tabellen in eine .xlsx-Datei mit zwei Arbeitsblättern. Bestehende Daten werden nicht verändert.</p>
-      <button type="button" disabled={working} style={button} onClick={() => void exportExcel()}>{working ? 'Bitte warten...' : 'Excel herunterladen (.xlsx)'}</button>
+      <h2>Lagerliste (wie auf Foto)</h2>
+      <p>Nr. · Bereich · Lagerplatz · Kennzeichen / Lagerschein · Fahrgestellnummer / Auto · Datum · Reifengröße · Radart · Reifenbezeichnung · Fahrzeugstandort. Dunkle Kopfzeile, Rahmen, Markierungen und A4-Querformat.</p>
+      <button type="button" disabled={working} style={button} onClick={() => void exportLagerliste()}>{working ? 'Bitte warten...' : 'Lagerliste herunterladen (.xlsx)'}</button>
+    </div>
+    <div style={style}>
+      <h2>Vollständiger Export (Backup)</h2>
+      <p>Exportiert Fahrzeuge und Radsätze in eine Excel-Datei mit zwei Arbeitsblättern. Nur diese Datei als Vorlage für den Import verwenden.</p>
+      <button type="button" disabled={working} style={button} onClick={() => void exportExcel()}>{working ? 'Bitte warten...' : 'Backup herunterladen (.xlsx)'}</button>
     </div>
     <div style={style}>
       <h2>Excel Import</h2>
-      <p>Importiere nur neue Datensätze. Bereits vorhandene Kennzeichen (Fahrzeuge) bzw. Belegnummern (Radsätze) werden übersprungen. Radsätze werden ohne Lagerplatz importiert.</p>
+      <p>Nur neue Datensätze. Bereits vorhandene Kennzeichen (Fahrzeuge) bzw. Belegnummern (Radsätze) werden übersprungen. Radsätze werden ohne Lagerplatz importiert. Die formatierte Lagerliste ist keine Importvorlage.</p>
       <label style={{ display: 'block', marginBottom: 12 }}>Datenart: <select value={kind} disabled={working} onChange={e => { setKind(e.target.value as Kind); setPreview([]); setStatus(''); setErrors([]); }} style={{ padding: 8, marginLeft: 8 }}><option value="Fahrzeuge">Fahrzeuge</option><option value="Radsaetze">Radsätze</option></select></label>
       <input type="file" accept=".xlsx,.xls" disabled={working} onChange={e => void chooseFile(e)} aria-label="Excel-Datei auswählen" />
       {preview.length > 0 && <>
