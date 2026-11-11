@@ -3,6 +3,7 @@ import { useEffect, useState } from 'react';
 import type { FormEvent } from 'react';
 import type { Session } from '@supabase/supabase-js';
 import { supabase } from './supabase';
+import Einlagerungsschein from './Einlagerungsschein';
 import {
   Search, ScanLine, Plus, CarFront, CircleDot,
   Warehouse, FileText, History, FileSpreadsheet,
@@ -50,7 +51,7 @@ export default function App() {
   const [loginError, setLoginError] = useState('');
   const [signingIn, setSigningIn] = useState(false);
 
-  const [page, setPage] = useState('Dashboard');
+  const [page, setPage] = useState(new URLSearchParams(window.location.search).has('qr') ? 'Einlagerungsscheine' : 'Dashboard');
   const [search, setSearch] = useState('');
   const [fahrzeuge, setFahrzeuge] = useState<Fahrzeug[]>([]);
   const [dataLoading, setDataLoading] = useState(false);
@@ -474,6 +475,7 @@ export default function App() {
                   style={buttonStyle}
                   onClick={() => {
                     setShowForm(!showForm);
+                    setForm({ ...emptyForm });
                     setMessage('');
                   }}
                 >
@@ -652,7 +654,9 @@ export default function App() {
             </>
           )}
 
-          {page !== 'Dashboard' && page !== 'Fahrzeuge' && (
+          {page === 'Einlagerungsscheine' && <Einlagerungsschein />}
+
+          {page !== 'Dashboard' && page !== 'Fahrzeuge' && page !== 'Einlagerungsscheine' && (
             <>
               <button
                 onClick={() => setPage('Dashboard')}
