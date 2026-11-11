@@ -41,6 +41,7 @@ export default function ExcelImportExport() {
   const [errors, setErrors] = useState<string[]>([]);
   const [working, setWorking] = useState(false);
   const [filename, setFilename] = useState('');
+  const [legacyImport, setLegacyImport] = useState(false);
 
   async function fetchData() {
     const [vehicles, receipts] = await Promise.all([
@@ -132,23 +133,65 @@ export default function ExcelImportExport() {
     finally { setWorking(false); }
   }
 
+  // Read legacy warehouse sheets with title lines above the actual table header.
+  function readLegacyRows(sheet: XLSX.WorkSheet, fileName: string): CellRow[] | null {
+    const grid = XLSX.utils.sheet_to_json<unknown[]>(sheet, { header: 1, defval: '', raw: false });
+    const headerIndex = grid.findIndex(row => {
+      const cells = row.map(v => text(v).toLowerCase());
+      return cells.some(v => v === 'bereich') && cells.some(v => v === 'lagerplatz') && cells.some(v => v.includes('kennzeichen'));
+    });
+    if (headerIndex < 0) return null;
+    const head = grid[headerIndex].map(v => text(v).toLowerCase());
+    const get = (row: unknown[], name: string) => {
+      const index = head.findIndex(h => h === name || h.startsWith(name + ' /'));
+      return index < 0 ? '' : text(row[index]);
+    };
+    const result: CellRow[] = [];
+    for (let i = headerIndex + 1; i < grid.length; i++) {
+      const row = grid[i];
+      const nr = get(row, 'nr.');
+      const label = get(row, 'kennzeichen');
+      const vehicle = get(row, 'fahrgestellnummer');
+      const tyre = get(row, 'reifengröße');
+      if (!nr && !label && !vehicle && !tyre) continue;
+      if (!label && !vehicle && !tyre) continue;
+      const source = get(row, 'quelldatei') || fileName;
+      const sourceLine = get(row, 'quellzeile') || nr || String(i + 1);
+      // Stable legacy receipt ID makes re-imports safe; do not treat Nr. as an actual receipt number.
+      const number = `ALT-${source.replace(/[^a-zA-Z0-9]/g, '').slice(0, 35)}-${sourceLine.replace(/[^a-zA-Z0-9]/g, '')}`;
+      result.push({
+        belegnummer: number,
+        kennzeichen: label || `OHNE-KZ-${sourceLine}`,
+        kundenname: '', fahrzeug: vehicle, saison: get(row, 'radart'),
+        reifengroesse: tyre, reifenbezeichnung: get(row, 'reifenbezeichnung'),
+        fahrzeugstandort: get(row, 'fahrzeugstandort'),
+        bemerkung: get(row, 'bemerkung'), datum_alt: get(row, 'datum'),
+        bereich_alt: get(row, 'bereich'), lagerplatz_alt: get(row, 'lagerplatz'),
+        quelle: source, quellzeile: sourceLine, nummer_alt: nr,
+      });
+    }
+    return result;
+  }
+
   async function chooseFile(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
-    setPreview([]); setErrors([]); setStatus(''); setFilename(file?.name || '');
+    setPreview([]); setErrors([]); setStatus(''); setFilename(file?.name || ''); setLegacyImport(false);
     if (!file) return;
     try {
       const workbook = XLSX.read(await file.arrayBuffer(), { type: 'array', cellDates: false });
       const preferred = kind === 'Fahrzeuge' ? 'Fahrzeuge' : 'Radsaetze';
       const sheet = workbook.Sheets[workbook.SheetNames.includes(preferred) ? preferred : workbook.SheetNames[0]];
       if (!sheet) throw new Error('Keine Tabelle gefunden.');
-      const rows = XLSX.utils.sheet_to_json<CellRow>(sheet, { defval: '', raw: false });
+      const legacy = kind === 'Radsaetze' ? readLegacyRows(sheet, file.name) : null;
+      const rows = legacy ?? XLSX.utils.sheet_to_json<CellRow>(sheet, { defval: '', raw: false });
+      setLegacyImport(legacy !== null);
       if (!rows.length) throw new Error('Die Excel-Tabelle ist leer.');
       if (rows.length > 2000) throw new Error('Bitte maximal 2000 Zeilen auf einmal importieren.');
       const required = kind === 'Fahrzeuge' ? ['kennzeichen'] : ['belegnummer', 'kennzeichen'];
       const missing = required.filter(c => !Object.keys(rows[0]).includes(c));
       if (missing.length) throw new Error(`Fehlende Spalten: ${missing.join(', ')}. Bitte den vollständigen Backup-Export als Vorlage verwenden.`);
       setPreview(rows);
-      setStatus(`${rows.length} Zeilen eingelesen. Bitte Vorschau prüfen. Noch nichts gespeichert.`);
+      setStatus(`${rows.length} Zeilen eingelesen${legacy ? ' (alte Lagerliste erkannt)' : ''}. Bitte Vorschau prüfen. Lagerplätze werden NICHT übernommen. Noch nichts gespeichert.`);
     } catch (e) { setErrors([e instanceof Error ? e.message : String(e)]); }
     event.target.value = '';
   }
@@ -181,7 +224,14 @@ export default function ExcelImportExport() {
           const row = preview[i], number = text(row.belegnummer), plate = normalize(row.kennzeichen);
           if (!number || !plate) { issues.push(`Zeile ${i + 2}: Belegnummer oder Kennzeichen fehlt.`); continue; }
           if (seen.has(normalize(number))) { skipped++; continue; }
-          const payload = { belegnummer: number, kennzeichen: plate, lager: '', lagerplatz: '', daten: { kundenname: text(row.kundenname), fahrzeug: text(row.fahrzeug), saison: text(row.saison) } };
+          const payload = { belegnummer: number, kennzeichen: plate, lager: '', lagerplatz: '', daten: {
+            kundenname: text(row.kundenname), fahrzeug: text(row.fahrzeug), saison: text(row.saison),
+            reifengroesse: text(row.reifengroesse), reifenbezeichnung: text(row.reifenbezeichnung),
+            fahrzeugstandort: text(row.fahrzeugstandort), bemerkung: text(row.bemerkung),
+            datum_alt: text(row.datum_alt), bereich_alt: text(row.bereich_alt),
+            lagerplatz_alt: text(row.lagerplatz_alt), quelle: text(row.quelle),
+            quellzeile: text(row.quellzeile), nummer_alt: text(row.nummer_alt),
+          } };
           const { error } = await supabase.from('reifenlager_scheine').insert(payload);
           if (error) issues.push(`Zeile ${i + 2}: ${error.message}`);
           else { added++; seen.add(normalize(number)); }
@@ -204,17 +254,18 @@ export default function ExcelImportExport() {
     </div>
     <div style={style}>
       <h2>Vollständiger Export (Backup)</h2>
-      <p>Exportiert Fahrzeuge und Radsätze in eine Excel-Datei mit zwei Arbeitsblättern. Nur diese Datei als Vorlage für den Import verwenden.</p>
+      <p>Exportiert Fahrzeuge und Radsätze in eine Excel-Datei mit zwei Arbeitsblättern. Diese Datei kann ebenfalls wieder importiert werden.</p>
       <button type="button" disabled={working} style={button} onClick={() => void exportExcel()}>{working ? 'Bitte warten...' : 'Backup herunterladen (.xlsx)'}</button>
     </div>
     <div style={style}>
       <h2>Excel Import</h2>
-      <p>Nur neue Datensätze. Bereits vorhandene Kennzeichen (Fahrzeuge) bzw. Belegnummern (Radsätze) werden übersprungen. Radsätze werden ohne Lagerplatz importiert. Die formatierte Lagerliste ist keine Importvorlage.</p>
+      <p>Nur neue Datensätze. Bereits vorhandene Kennzeichen (Fahrzeuge) bzw. Belegnummern (Radsätze) werden übersprungen. Radsätze werden ohne Lagerplatz importiert. Auch die alte Lagerliste mit Nr., Bereich, Lagerplatz usw. wird erkannt. Alte Lagerplätze werden nur als Information gespeichert und NICHT zugewiesen.</p>
       <label style={{ display: 'block', marginBottom: 12 }}>Datenart: <select value={kind} disabled={working} onChange={e => { setKind(e.target.value as Kind); setPreview([]); setStatus(''); setErrors([]); }} style={{ padding: 8, marginLeft: 8 }}><option value="Fahrzeuge">Fahrzeuge</option><option value="Radsaetze">Radsätze</option></select></label>
       <input type="file" accept=".xlsx,.xls" disabled={working} onChange={e => void chooseFile(e)} aria-label="Excel-Datei auswählen" />
+      {legacyImport && preview.length > 0 && <p style={{ color: '#92400e', fontWeight: 600 }}>Alte Lagerliste erkannt. Alle neuen Radsätze werden ohne Lagerplatz angelegt. Fehlende Kennzeichen erhalten die Kennung OHNE-KZ-...; bitte später prüfen.</p>}
       {preview.length > 0 && <>
         <h3>Vorschau: {preview.length} Zeilen ({filename})</h3>
-        <div style={{ overflowX: 'auto', maxHeight: 340, overflowY: 'auto', marginBottom: 12 }}><table style={{ borderCollapse: 'collapse', fontSize: 13 }}><thead><tr>{columns[kind].map(k => <th key={k} style={{ padding: 8, border: '1px solid #cbd5e1', textAlign: 'left' }}>{k}</th>)}</tr></thead><tbody>{preview.slice(0, 20).map((r, i) => <tr key={i}>{columns[kind].map(k => <td key={k} style={{ padding: 8, border: '1px solid #e2e8f0' }}>{text(r[k])}</td>)}</tr>)}</tbody></table></div>
+        <div style={{ overflowX: 'auto', maxHeight: 340, overflowY: 'auto', marginBottom: 12 }}><table style={{ borderCollapse: 'collapse', fontSize: 13 }}><thead><tr>{(legacyImport ? [...columns[kind], 'reifengroesse', 'reifenbezeichnung', 'fahrzeugstandort', 'bemerkung', 'lagerplatz_alt'] : columns[kind]).map(k => <th key={k} style={{ padding: 8, border: '1px solid #cbd5e1', textAlign: 'left' }}>{k}</th>)}</tr></thead><tbody>{preview.slice(0, 20).map((r, i) => <tr key={i}>{(legacyImport ? [...columns[kind], 'reifengroesse', 'reifenbezeichnung', 'fahrzeugstandort', 'bemerkung', 'lagerplatz_alt'] : columns[kind]).map(k => <td key={k} style={{ padding: 8, border: '1px solid #e2e8f0' }}>{text(r[k])}</td>)}</tr>)}</tbody></table></div>
         {preview.length > 20 && <p>Vorschau zeigt die ersten 20 Zeilen.</p>}
         <button type="button" disabled={working} style={button} onClick={() => void importExcel()}>{working ? 'Import läuft...' : `${preview.length} Zeilen importieren`}</button>
       </>}
