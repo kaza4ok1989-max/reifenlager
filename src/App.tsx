@@ -5,8 +5,9 @@ import type { Session } from '@supabase/supabase-js';
 import { supabase } from './supabase';
 import Einlagerungsschein from './Einlagerungsschein';
 import LagerUebersicht from './LagerUebersicht';
+import ExcelImportExport from './ExcelImportExport';
 import {
-  Search, ScanLine, Plus, CarFront, CircleDot,
+  Search, ScanLine, Plus, CarFront,
   Warehouse, FileText, History, FileSpreadsheet,
   LayoutDashboard, LogOut, ArrowLeft, RefreshCw, Pencil, Trash2
 } from 'lucide-react';
@@ -37,7 +38,6 @@ const emptyForm = {
 const menu = [
   { title: 'Dashboard', icon: LayoutDashboard },
   { title: 'Fahrzeuge', icon: CarFront },
-  { title: 'Radsätze', icon: CircleDot },
   { title: 'Lagerplan', icon: Warehouse },
   { title: 'Einlagerungsscheine', icon: FileText },
   { title: 'Historie', icon: History },
@@ -431,7 +431,7 @@ export default function App() {
                 </div>
                 <div
                   className="action-card"
-                  onClick={() => setPage('Radsätze')}
+                  onClick={() => setPage('Lagerplan')}
                   style={{ cursor: 'pointer' }}
                 >
                   <Plus size={28} />
@@ -726,11 +726,13 @@ export default function App() {
             </>
           )}
 
-          {(page === 'Radsätze' || page === 'Lagerplan') && <LagerUebersicht view={page} />}
+          {page === 'Lagerplan' && <LagerUebersicht view="Lagerplan" />}
 
           {page === 'Einlagerungsscheine' && <Einlagerungsschein />}
 
-          {page !== 'Dashboard' && page !== 'Fahrzeuge' && page !== 'Einlagerungsscheine' && page !== 'Radsätze' && page !== 'Lagerplan' && (
+          {page === 'Excel Import / Export' && <ExcelImportExport />}
+
+          {page !== 'Dashboard' && page !== 'Fahrzeuge' && page !== 'Einlagerungsscheine' && page !== 'Lagerplan' && page !== 'Excel Import / Export' && (
             <>
               <button
                 onClick={() => setPage('Dashboard')}
