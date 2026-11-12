@@ -75,6 +75,16 @@ export default function Einlagerungsschein() {
   const [printMode, setPrintMode] = useState<'form' | 'labels'>('form');
   const [lookup, setLookup] = useState(false);
   const [loaded, setLoaded] = useState(false);
+  const [actionBusy, setActionBusy] = useState(false);
+  const [shelves, setShelves] = useState<string[]>([]);
+  const [targetArea, setTargetArea] = useState<'Zelt' | 'Lager'>('Zelt');
+  const [targetPlace, setTargetPlace] = useState('');
+  const [showMove, setShowMove] = useState(false);
+  const [showCondition, setShowCondition] = useState(false);
+  const [tread, setTread] = useState<string[]>(['', '', '', '']);
+  const [dotValues, setDotValues] = useState<string[]>(['', '', '', '']);
+  const [condition, setCondition] = useState('');
+  const [inspectionStatus, setInspectionStatus] = useState('OK');
 
   const change = <K extends keyof Data>(key: K, value: Data[K]) => {
     setData(old => ({ ...old, [key]: value }));
@@ -105,7 +115,12 @@ export default function Einlagerungsschein() {
       const row = result as unknown as Raw;
       setRaw(source);
       setImported(isImported(source, row));
-      setData(normalize(source, row));
+      const normalized = normalize(source, row);
+      setData(normalized);
+      setTread(normalized.profiltiefe);
+      setDotValues(normalized.dot);
+      setCondition(normalized.zustand);
+      setTargetArea(normalized.lager === 'Lager' ? 'Lager' : 'Zelt');
       setRecordId(result.id);
       setLoaded(true);
       setLookup(false);
@@ -138,6 +153,95 @@ export default function Einlagerungsschein() {
     else { setRecordId(result.id); setNotice('Gespeichert. QR-Etiketten können gedruckt werden.'); }
     setSaving(false);
   }
+  // Read current data again before modifying a scanned set.
+  async function reloadRecord() {
+    if (!recordId) return;
+    const { data: result, error } = await supabase.from('reifenlager_scheine')
+      .select('id,belegnummer,kennzeichen,lager,lagerplatz,daten,erstellt_am').eq('id', recordId).single();
+    if (error || !result) throw new Error(error?.message || 'Radsatz nicht gefunden.');
+    const source = result.daten && typeof result.daten === 'object' && !Array.isArray(result.daten)
+      ? result.daten as Raw : {};
+    setRaw(source);
+    setData(normalize(source, result as unknown as Raw));
+  }
+
+  useEffect(() => {
+    if (!loaded) return;
+    void supabase.from('reifenlager_regale').select('nummer').order('nummer')
+      .then(({ data: result }) => setShelves((result || []).map(r => String(r.nummer))));
+  }, [loaded]);
+
+  async function releaseSet() {
+    if (!recordId || actionBusy || !data.lagerplatz) return;
+    if (!window.confirm(`Lagerplatz ${data.lagerplatz} freigeben? Der Radsatz bleibt gespeichert.`)) return;
+    setActionBusy(true); setNotice('');
+    try {
+      const { data: changed, error } = await supabase.from('reifenlager_scheine')
+        .update({ lagerplatz: '' }).eq('id', recordId).select('id');
+      if (error) throw error;
+      if (!changed?.length) throw new Error('Keine Berechtigung oder Radsatz nicht gefunden.');
+      await reloadRecord();
+      setNotice('Auslagerung gespeichert. Der Radsatz und der QR-Code bleiben erhalten.');
+    } catch (e) { setNotice('Fehler: ' + (e instanceof Error ? e.message : String(e))); }
+    finally { setActionBusy(false); }
+  }
+
+  async function moveSet() {
+    if (!recordId || actionBusy || !targetPlace) return;
+    setActionBusy(true); setNotice('');
+    try {
+      const { error } = await supabase.rpc('reifenlager_platz_zuweisen', {
+        p_schein_id: recordId, p_lager: targetArea, p_lagerplatz: targetPlace
+      });
+      if (error) throw error;
+      await reloadRecord();
+      setShowMove(false);
+      setNotice(`Lagerplatz gespeichert: ${targetArea} / ${targetPlace}.`);
+    } catch (e) { setNotice('Umlagerung fehlgeschlagen: ' + (e instanceof Error ? e.message : String(e))); }
+    finally { setActionBusy(false); }
+  }
+
+  async function saveCondition() {
+    if (!recordId || actionBusy) return;
+    setActionBusy(true); setNotice('');
+    try {
+      const { data: current, error: readError } = await supabase.from('reifenlager_scheine')
+        .select('daten').eq('id', recordId).single();
+      if (readError || !current) throw readError || new Error('Radsatz nicht gefunden.');
+      const original = current.daten && typeof current.daten === 'object' && !Array.isArray(current.daten)
+        ? current.daten as Raw : {};
+      const next = { ...original, profiltiefe: tread, dot: dotValues, zustand: condition,
+        pruefstatus: inspectionStatus, letzte_pruefung: new Date().toISOString() };
+      const { data: changed, error } = await supabase.from('reifenlager_scheine')
+        .update({ daten: next }).eq('id', recordId).select('id');
+      if (error) throw error;
+      if (!changed?.length) throw new Error('Keine Berechtigung.');
+      await reloadRecord();
+      setShowCondition(false);
+      setNotice('Reifenzustand gespeichert.');
+    } catch (e) { setNotice('Fehler: ' + (e instanceof Error ? e.message : String(e))); }
+    finally { setActionBusy(false); }
+  }
+
+  async function markInventur() {
+    if (!recordId || actionBusy) return;
+    setActionBusy(true); setNotice('');
+    try {
+      const { error } = await supabase.from('reifenlager_inventur').insert({
+        schein_id: recordId, kennzeichen: data.kennzeichen, lager: data.lager || null,
+        lagerplatz: data.lagerplatz || null
+      });
+      if (error) throw error;
+      setNotice('Inventur: Radsatz als geprüft markiert.');
+    } catch (e) { setNotice('Inventur fehlgeschlagen. Ist inventur.sql ausgeführt? ' + (e instanceof Error ? e.message : String(e))); }
+    finally { setActionBusy(false); }
+  }
+
+  const targetPlaces = targetArea === 'Zelt'
+    ? shelves.flatMap(n => [0, 1, 2].map(i => `${n}0${i}`))
+    : Array.from({ length: 6 }, (_, r) => Array.from({ length: 6 }, (_, s) =>
+        [`R${r + 1}-${s + 1}-Unten`, `R${r + 1}-${s + 1}-Oben`])).flat(2);
+
   function print(mode: 'form' | 'labels') {
     setPrintMode(mode);
     window.setTimeout(() => window.print(), 120);
@@ -181,8 +285,30 @@ export default function Einlagerungsschein() {
           onClick={() => print('labels')}>5 QR-Etiketten drucken</button>
         <button type="button" onClick={newForm}>Neues Formular</button>
         {loaded && <button type="button" onClick={() => { window.history.replaceState({}, '', base); window.location.reload(); }}>Zurück zum Dashboard</button>}
+        {loaded && <button type="button" disabled={actionBusy} onClick={() => { setShowMove(v => !v); setShowCondition(false); }}>Umlagern</button>}
+        {loaded && !!data.lagerplatz && <button type="button" disabled={actionBusy} onClick={() => void releaseSet()}>Auslagern</button>}
+        {loaded && <button type="button" disabled={actionBusy} onClick={() => void markInventur()}>Inventur: geprüft</button>}
+        {loaded && <button type="button" disabled={actionBusy} onClick={() => { setShowCondition(v => !v); setShowMove(false); }}>Reifenzustand prüfen</button>}
       </div>
     </div>
+
+    {loaded && showMove && <div className="no-print" style={{ background: '#fff', border: '1px solid #cbd5e1', borderRadius: 12, padding: 18, margin: '16px 0' }}>
+      <h2>Radsatz umlagern</h2>
+      <label>Bereich <select value={targetArea} onChange={e => { setTargetArea(e.target.value as 'Zelt' | 'Lager'); setTargetPlace(''); }}><option value="Zelt">Zelt</option><option value="Lager">Lager</option></select></label>
+      <label style={{ marginLeft: 12 }}>Lagerplatz <select value={targetPlace} onChange={e => setTargetPlace(e.target.value)}><option value="">Platz wählen</option>{targetPlaces.map(p => <option key={p} value={p}>{p}</option>)}</select></label>
+      <p>Belegte Plätze werden von der Datenbank automatisch gesperrt.</p>
+      <button type="button" disabled={actionBusy || !targetPlace} onClick={() => void moveSet()}>Neuen Platz speichern</button>
+    </div>}
+    {loaded && showCondition && <div className="no-print" style={{ background: '#fff', border: '1px solid #cbd5e1', borderRadius: 12, padding: 18, margin: '16px 0' }}>
+      <h2>Reifenzustand prüfen</h2>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12 }}>{positions.map((p, i) => <div key={p} style={{ display: 'grid', gap: 5 }}><strong>{p}</strong>
+        <label>Profiltiefe (mm) <input style={{ width: 85 }} value={tread[i]} onChange={e => setTread(old => old.map((v, j) => j === i ? e.target.value : v))}/></label>
+        <label>DOT <input style={{ width: 85 }} value={dotValues[i]} onChange={e => setDotValues(old => old.map((v, j) => j === i ? e.target.value : v))}/></label>
+      </div>)}</div>
+      <p><label>Status <select value={inspectionStatus} onChange={e => setInspectionStatus(e.target.value)}><option>OK</option><option>Prüfen</option><option>Ersetzen</option></select></label></p>
+      <p><label>Zustand / Bemerkung <input style={{ width: '100%', maxWidth: 600 }} value={condition} onChange={e => setCondition(e.target.value)}/></label></p>
+      <button type="button" disabled={actionBusy} onClick={() => void saveCondition()}>Prüfung speichern</button>
+    </div>}
 
     {imported ? (
       <div className="schein-paper" style={{ padding: 24, background: '#fff', color: '#12365a' }}>
