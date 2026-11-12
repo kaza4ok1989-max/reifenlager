@@ -20,6 +20,14 @@ const menu = [
   { title: 'Historie', icon: History },
   { title: 'Excel Import / Export', icon: FileSpreadsheet },
 ];
+const pageFromUrl = () => {
+  const params = new URLSearchParams(window.location.search);
+  if (params.has('qr')) return 'Einlagerungsscheine';
+  const requested = params.get('page');
+  return menu.some(item => item.title === requested) ? requested! : 'Dashboard';
+};
+const pageHref = (title: string) => `${import.meta.env.BASE_URL}?page=${encodeURIComponent(title)}`;
+
 const text = (value: unknown): string => typeof value === 'string' || typeof value === 'number' ? String(value).trim() : '';
 // Ignore spaces, punctuation and letter case when searching plates and tyre sizes.
 const normalizeSearch = (value: unknown): string => text(value).toLocaleLowerCase().normalize('NFKD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]/g, '');
@@ -33,7 +41,7 @@ export default function App() {
   const [password, setPassword] = useState('');
   const [loginError, setLoginError] = useState('');
   const [signingIn, setSigningIn] = useState(false);
-  const [page, setPage] = useState(new URLSearchParams(window.location.search).has('qr') ? 'Einlagerungsscheine' : 'Dashboard');
+  const [page, setPage] = useState(pageFromUrl);
   const [search, setSearch] = useState('');
   const [radsatzList, setRadsatzList] = useState<Radsatz[]>([]);
   const [dataLoading, setDataLoading] = useState(false);
@@ -44,6 +52,12 @@ export default function App() {
     void supabase.auth.getSession().then(({ data }) => { setSession(data.session); setLoading(false); });
     const { data: listener } = supabase.auth.onAuthStateChange((_event, newSession) => { setSession(newSession); setLoading(false); });
     return () => listener.subscription.unsubscribe();
+  }, []);
+
+  useEffect(() => {
+    const onPopState = () => { setPage(pageFromUrl()); setSearch(''); };
+    window.addEventListener('popstate', onPopState);
+    return () => window.removeEventListener('popstate', onPopState);
   }, []);
 
   useEffect(() => {
@@ -80,8 +94,8 @@ export default function App() {
     await supabase.auth.signOut(); setSession(null); setPassword(''); setPage('Dashboard');
   }
   function navigate(target: string) {
+    window.history.pushState({}, '', pageHref(target));
     setPage(target); setSearch('');
-    if (window.location.search) window.history.replaceState({}, '', `${window.location.origin}${window.location.pathname}`);
     if (target === 'Dashboard') void loadRadsaetze();
   }
   function openSchein(id: string) {
@@ -133,7 +147,7 @@ export default function App() {
       <button onClick={() => void handleLogout()} style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8, padding: '9px 14px', borderRadius: 8, border: '1px solid #94a3b8', background: 'transparent', color: 'inherit', cursor: 'pointer' }}><LogOut size={18} /> Abmelden</button>
     </header>
     <div className="layout">
-      <aside className="sidebar">{menu.map(({ title, icon: Icon }) => <div key={title} className={'nav-item' + (page === title ? ' active' : '')} onClick={() => navigate(title)} style={{ cursor: 'pointer' }}><Icon size={20} /><span>{title}</span></div>)}</aside>
+      <aside className="sidebar">{menu.map(({ title, icon: Icon }) => <a key={title} href={pageHref(title)} className={'nav-item' + (page === title ? ' active' : '')} aria-current={page === title ? 'page' : undefined} onClick={event => { if (event.button !== 0 || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return; event.preventDefault(); navigate(title); }} style={{ cursor: 'pointer', textDecoration: 'none', color: 'inherit', display: 'flex' }}><Icon size={20} /><span>{title}</span></a>)}</aside>
       <main className="content">
         {page === 'Dashboard' && <>
           <div className="welcome"><h1>Reifenlager</h1><p>Radsätze und Lagerplätze verwalten</p></div>

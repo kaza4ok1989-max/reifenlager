@@ -31,6 +31,8 @@ const comparable = (a: ReturnType<typeof identity>, b: ReturnType<typeof identit
   return a.vin && b.vin && a.season && b.season && a.size && b.size ? 'match' : 'possible';
 };
 type ImportCheck = { state: 'Neu' | 'Bereits vorhanden' | 'Prüfen'; reason: string };
+type ReviewDecision = 'skip' | 'import';
+type PreviewFilter = 'Alle' | 'Neu' | 'Bereits vorhanden' | 'Prüfen';
 const pick = (d: CellRow, ...keys: string[]) => { for (const key of keys) { const value = text(d[key]); if (value) return value; } return ''; };
 const dateGerman = (value: unknown) => {
   const s = text(value);
@@ -61,6 +63,9 @@ export default function ExcelImportExport() {
   const [legacyImport, setLegacyImport] = useState(false);
   const [checks, setChecks] = useState<ImportCheck[]>([]);
   const [checking, setChecking] = useState(false);
+  const [reviewDecisions, setReviewDecisions] = useState<Record<number, ReviewDecision>>({});
+  const [previewFilter, setPreviewFilter] = useState<PreviewFilter>('Alle');
+  const [previewSearch, setPreviewSearch] = useState('');
 
   async function fetchData() {
     const [vehicles, receipts] = await Promise.all([
@@ -194,7 +199,7 @@ export default function ExcelImportExport() {
 
   async function chooseFile(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
-    setPreview([]); setChecks([]); setErrors([]); setStatus(''); setFilename(file?.name || ''); setLegacyImport(false);
+    setPreview([]); setChecks([]); setReviewDecisions({}); setPreviewFilter('Alle'); setPreviewSearch(''); setErrors([]); setStatus(''); setFilename(file?.name || ''); setLegacyImport(false);
     if (!file) return;
     try {
       const workbook = XLSX.read(await file.arrayBuffer(), { type: 'array', cellDates: false });
@@ -266,6 +271,15 @@ export default function ExcelImportExport() {
     });
   }
 
+  function decide(index: number, decision: ReviewDecision | null) {
+    setReviewDecisions(previous => {
+      const next = { ...previous };
+      if (decision === null) delete next[index];
+      else next[index] = decision;
+      return next;
+    });
+  }
+
   async function importExcel() {
     if (!preview.length || working || checking) return;
     setWorking(true); setErrors([]); setStatus('Datenbank wird erneut geprüft...');
@@ -280,24 +294,33 @@ export default function ExcelImportExport() {
         if (result.state === 'Neu') seenInThisImport.push(row);
         return result;
       });
-      setChecks(current);
-      const newCount = current.filter(x => x.state === 'Neu').length;
-      const skippedCount = current.filter(x => x.state === 'Bereits vorhanden').length;
-      const reviewCount = current.filter(x => x.state === 'Prüfen').length;
-      if (!newCount) {
-        setStatus(`Keine sicheren neuen Einträge. ${skippedCount} bereits vorhanden, ${reviewCount} manuell prüfen. Nichts gespeichert.`);
-        return;
-      }
-      if (!window.confirm(`${newCount} neue Einträge importieren?\n${skippedCount} Duplikate überspringen\n${reviewCount} unklare Einträge NICHT importieren\nLagerplätze werden nicht übernommen.`)) {
-        setStatus('Import abgebrochen. Nichts gespeichert.');
-        return;
-      }
+       setChecks(current);
+       // Manual approvals are only for ambiguous matches. An existing receipt number
+       // must never be imported, even if it was approved in the preview.
+       const approved = current.map((check, index) =>
+         check.state === 'Neu' || (check.state === 'Prüfen' && reviewDecisions[index] === 'import')
+       );
+       const newCount = approved.filter(Boolean).length;
+       const skippedCount = current.filter((x, index) => x.state === 'Bereits vorhanden' || (x.state === 'Prüfen' && reviewDecisions[index] === 'skip')).length;
+       const reviewCount = current.filter((x, index) => x.state === 'Prüfen' && !reviewDecisions[index]).length;
+       if (!newCount) {
+         setStatus(`Keine freigegebenen neuen Einträge. ${skippedCount} übersprungen, ${reviewCount} noch zu prüfen. Nichts gespeichert.`);
+         return;
+       }
+       if (!window.confirm(`${newCount} freigegebene Einträge importieren?\n${skippedCount} überspringen\n${reviewCount} unentschiedene Einträge NICHT importieren\nLagerplätze werden nicht übernommen.`)) {
+         setStatus('Import abgebrochen. Nichts gespeichert.');
+         return;
+       }
       const accepted: CellRow[] = [];
       for (let i = 0; i < preview.length; i++) {
         const row = preview[i];
         const check = classify(row, existing, accepted, kind);
-        if (check.state === 'Bereits vorhanden') { skipped++; continue; }
-        if (check.state === 'Prüfen') { review++; continue; }
+        if (check.state === 'Bereits vorhanden' || (check.state === 'Prüfen' && reviewDecisions[i] === 'skip')) { skipped++; continue; }
+        if (check.state === 'Prüfen' && reviewDecisions[i] !== 'import') { review++; continue; }
+        const duplicateInBatch = accepted.some(other => kind === 'Fahrzeuge'
+          ? normalize(other.kennzeichen) === normalize(row.kennzeichen)
+          : normalize(other.belegnummer) === normalize(row.belegnummer));
+        if (duplicateInBatch) { skipped++; continue; }
         if (kind === 'Fahrzeuge') {
           const plate = normalize(row.kennzeichen);
           const payload = Object.fromEntries(columns.Fahrzeuge.map(k => [k, k === 'kennzeichen' ? plate : text(row[k]) || null]));
@@ -321,10 +344,17 @@ export default function ExcelImportExport() {
       }
       setStatus(`Fertig: ${added} importiert, ${skipped} Duplikate übersprungen, ${review} zur manuellen Prüfung, ${issues.length} Fehler.`);
       setErrors(issues);
-      setPreview([]); setChecks([]);
+      setPreview([]); setChecks([]); setReviewDecisions({});
     } catch (e) { setErrors([e instanceof Error ? e.message : String(e)]); setStatus('Import abgebrochen.'); }
     finally { setWorking(false); }
   }
+
+  const visibleRows = preview.map((row, index) => ({ row, index, check: checks[index] }))
+    .filter(({ row, check }) => (previewFilter === 'Alle' || check?.state === previewFilter)
+      && (!previewSearch || [row.kennzeichen, row.belegnummer, row.fahrzeug, row.vin, row.fin, row.reifengroesse, row.saison, row.kundenname, row.quelle]
+        .some(value => normalize(value).includes(normalize(previewSearch)))));
+  const importCount = checks.filter((check, index) => check.state === 'Neu' || (check.state === 'Prüfen' && reviewDecisions[index] === 'import')).length;
+  const unresolvedCount = checks.filter((check, index) => check.state === 'Prüfen' && !reviewDecisions[index]).length;
 
   return <section style={{ maxWidth: 1100 }}>
     <h1>Excel Import / Export</h1>
@@ -342,14 +372,37 @@ export default function ExcelImportExport() {
     <div style={style}>
       <h2>Excel Import</h2>
       <p>Nur neue Datensätze. Bereits vorhandene Kennzeichen (Fahrzeuge) bzw. Belegnummern (Radsätze) werden übersprungen. Ähnliche Radsätze mit anderer Belegnummer werden zur manuellen Prüfung zurückgestellt. Radsätze werden ohne Lagerplatz importiert. Auch die alte Lagerliste mit Nr., Bereich, Lagerplatz usw. wird erkannt. Alte Lagerplätze werden nur als Information gespeichert und NICHT zugewiesen.</p>
-      <label style={{ display: 'block', marginBottom: 12 }}>Datenart: <select value={kind} disabled={working} onChange={e => { setKind(e.target.value as Kind); setPreview([]); setStatus(''); setErrors([]); }} style={{ padding: 8, marginLeft: 8 }}><option value="Fahrzeuge">Fahrzeuge</option><option value="Radsaetze">Radsätze</option></select></label>
+      <label style={{ display: 'block', marginBottom: 12 }}>Datenart: <select value={kind} disabled={working} onChange={e => { setKind(e.target.value as Kind); setPreview([]); setChecks([]); setReviewDecisions({}); setPreviewFilter('Alle'); setPreviewSearch(''); setStatus(''); setErrors([]); }} style={{ padding: 8, marginLeft: 8 }}><option value="Fahrzeuge">Fahrzeuge</option><option value="Radsaetze">Radsätze</option></select></label>
       <input type="file" accept=".xlsx,.xls" disabled={working} onChange={e => void chooseFile(e)} aria-label="Excel-Datei auswählen" />
       {legacyImport && preview.length > 0 && <p style={{ color: '#92400e', fontWeight: 600 }}>Alte Lagerliste erkannt. Alle neuen Radsätze werden ohne Lagerplatz angelegt. Fehlende Kennzeichen erhalten die Kennung OHNE-KZ-...; bitte später prüfen.</p>}
       {preview.length > 0 && <>
-        <h3>Vorschau: {preview.length} Zeilen ({filename})</h3>
-        <div style={{ overflowX: 'auto', maxHeight: 340, overflowY: 'auto', marginBottom: 12 }}><table style={{ borderCollapse: 'collapse', fontSize: 13 }}><thead><tr><th style={{ padding: 8, border: '1px solid #cbd5e1' }}>Status</th>{(legacyImport ? [...columns[kind], 'reifengroesse', 'reifenbezeichnung', 'fahrzeugstandort', 'bemerkung', 'lagerplatz_alt'] : columns[kind]).map(k => <th key={k} style={{ padding: 8, border: '1px solid #cbd5e1', textAlign: 'left' }}>{k}</th>)}</tr></thead><tbody>{preview.slice(0, 20).map((r, i) => <tr key={i}><td style={{ padding: 8, border: '1px solid #e2e8f0', color: checks[i]?.state === 'Neu' ? '#166534' : '#92400e' }} title={checks[i]?.reason}>{checks[i]?.state}</td>{(legacyImport ? [...columns[kind], 'reifengroesse', 'reifenbezeichnung', 'fahrzeugstandort', 'bemerkung', 'lagerplatz_alt'] : columns[kind]).map(k => <td key={k} style={{ padding: 8, border: '1px solid #e2e8f0' }}>{text(r[k])}</td>)}</tr>)}</tbody></table></div>
-        {preview.length > 20 && <p>Vorschau zeigt die ersten 20 Zeilen.</p>}
-        <button type="button" disabled={working || checking || !checks.some(c => c.state === 'Neu')} style={button} onClick={() => void importExcel()}>{working ? 'Import läuft...' : `${checks.filter(c => c.state === 'Neu').length} neue Einträge importieren`}</button>
+         <h3>Vorschau: {preview.length} Zeilen ({filename})</h3>
+         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center', marginBottom: 12 }}>
+           {(['Alle', 'Neu', 'Bereits vorhanden', 'Prüfen'] as PreviewFilter[]).map(filter => <button key={filter} type="button" onClick={() => setPreviewFilter(filter)} style={{ ...button, background: previewFilter === filter ? '#12365a' : '#fff', color: previewFilter === filter ? '#fff' : '#12365a', padding: '7px 10px' }}>
+             {filter === 'Prüfen' ? 'Nur Prüfen' : filter} ({filter === 'Alle' ? preview.length : checks.filter(c => c.state === filter).length})
+           </button>)}
+           <input aria-label="Vorschau durchsuchen" placeholder="Kennzeichen, FIN, Belegnummer suchen..." value={previewSearch} onChange={e => setPreviewSearch(e.target.value)} style={{ padding: 9, minWidth: 250, flex: 1, border: '1px solid #cbd5e1', borderRadius: 8 }} />
+         </div>
+         <p style={{ color: '#475569' }}>{visibleRows.length} Zeilen angezeigt. {unresolvedCount} Einträge noch manuell prüfen. Entscheidungen gelten nur für diese Datei.</p>
+         <div style={{ overflowX: 'auto', maxHeight: 480, overflowY: 'auto', marginBottom: 12 }}>
+           <table style={{ borderCollapse: 'collapse', fontSize: 13, minWidth: '100%' }}>
+             <thead><tr><th style={{ padding: 8, border: '1px solid #cbd5e1', position: 'sticky', top: 0, background: '#eef2f7', zIndex: 1 }}>Status / Entscheidung</th>{(legacyImport ? [...columns[kind], 'reifengroesse', 'reifenbezeichnung', 'fahrzeugstandort', 'bemerkung', 'lagerplatz_alt'] : columns[kind]).map(k => <th key={k} style={{ padding: 8, border: '1px solid #cbd5e1', textAlign: 'left', position: 'sticky', top: 0, background: '#eef2f7', zIndex: 1 }}>{k}</th>)}</tr></thead>
+             <tbody>{visibleRows.map(({ row, index, check }) => <tr key={index}>
+               <td style={{ padding: 8, border: '1px solid #e2e8f0', minWidth: 205, verticalAlign: 'top', color: check?.state === 'Neu' ? '#166534' : '#92400e' }}>
+                 <strong>{check?.state}</strong>
+                 <div style={{ color: '#64748b', marginTop: 4 }}>{check?.reason}</div>
+                 {check?.state === 'Prüfen' && <div style={{ display: 'grid', gap: 5, marginTop: 8 }}>
+                   <button type="button" disabled={working} onClick={() => decide(index, 'skip')} style={{ ...button, padding: '6px 8px', background: reviewDecisions[index] === 'skip' ? '#166534' : '#fff', color: reviewDecisions[index] === 'skip' ? '#fff' : '#12365a' }}>Schon vorhanden</button>
+                   <button type="button" disabled={working} onClick={() => decide(index, 'import')} style={{ ...button, padding: '6px 8px', background: reviewDecisions[index] === 'import' ? '#166534' : '#fff', color: reviewDecisions[index] === 'import' ? '#fff' : '#12365a' }}>Als neu importieren</button>
+                   {reviewDecisions[index] && <button type="button" disabled={working} onClick={() => decide(index, null)} style={{ border: 0, background: 'transparent', cursor: 'pointer', textDecoration: 'underline' }}>Entscheidung zurücksetzen</button>}
+                 </div>}
+               </td>
+               {(legacyImport ? [...columns[kind], 'reifengroesse', 'reifenbezeichnung', 'fahrzeugstandort', 'bemerkung', 'lagerplatz_alt'] : columns[kind]).map(k => <td key={k} style={{ padding: 8, border: '1px solid #e2e8f0', verticalAlign: 'top' }}>{text(row[k])}</td>)}
+             </tr>)}</tbody>
+           </table>
+         </div>
+         <button type="button" disabled={working || checking || !importCount} style={button} onClick={() => void importExcel()}>{working ? 'Import läuft...' : `${importCount} freigegebene Einträge importieren`}</button>
+         {unresolvedCount > 0 && <p style={{ color: '#92400e' }}>{unresolvedCount} ungeklärte Zeilen werden beim Import automatisch ausgelassen.</p>}
       </>}
     </div>
     {status && <p role="status" style={{ color: '#166534', fontWeight: 600 }}>{status}</p>}
