@@ -80,6 +80,7 @@ export default function Einlagerungsschein() {
   const [targetArea, setTargetArea] = useState<'Zelt' | 'Lager'>('Zelt');
   const [targetPlace, setTargetPlace] = useState('');
   const [showMove, setShowMove] = useState(false);
+  const [assignForInventur, setAssignForInventur] = useState(false);
   const [showCondition, setShowCondition] = useState(false);
   const [tread, setTread] = useState<string[]>(['', '', '', '']);
   const [dotValues, setDotValues] = useState<string[]>(['', '', '', '']);
@@ -223,20 +224,47 @@ export default function Einlagerungsschein() {
     finally { setActionBusy(false); }
   }
 
-  async function markInventur() {
+  async function markInventur(assignPlace = false) {
     if (!recordId || actionBusy) return;
     setActionBusy(true); setNotice('');
     try {
+      // Re-read the database so a stale QR page cannot accidentally mark a
+      // released or moved set with an outdated location.
+      const { data: current, error: currentError } = await supabase.from('reifenlager_scheine')
+        .select('id,kennzeichen,lager,lagerplatz').eq('id', recordId).single();
+      if (currentError || !current) throw currentError || new Error('Radsatz nicht gefunden.');
+      let currentArea = current.lager || '';
+      let currentPlace = current.lagerplatz || '';
+      if (!currentPlace.trim()) {
+        if (!assignPlace) {
+          setTargetArea(currentArea === 'Lager' ? 'Lager' : 'Zelt');
+          setTargetPlace('');
+          setAssignForInventur(true);
+          setShowMove(false);
+          setNotice('Kein Lagerplatz zugeordnet. Bitte zuerst einen Lagerplatz wählen.');
+          return;
+        }
+        if (!targetPlace) throw new Error('Bitte Lagerplatz wählen.');
+        // The existing database RPC protects against assigning an occupied place.
+        const { error: assignError } = await supabase.rpc('reifenlager_platz_zuweisen', {
+          p_schein_id: recordId, p_lager: targetArea, p_lagerplatz: targetPlace
+        });
+        if (assignError) throw assignError;
+        currentArea = targetArea;
+        currentPlace = targetPlace;
+        await reloadRecord();
+      }
       const { data: round, error: roundError } = await supabase.from('reifenlager_inventur_runden')
         .select('id').is('abgeschlossen_am', null).order('gestartet_am', { ascending: false }).limit(1).maybeSingle();
-      if (roundError) throw new Error(roundError.message);
+      if (roundError) throw roundError;
       if (!round) throw new Error('Keine aktive Inventur. Bitte im Menü Inventur eine neue Runde starten.');
       const { error } = await supabase.from('reifenlager_inventur').insert({
-        schein_id: recordId, kennzeichen: data.kennzeichen, lager: data.lager || null,
-        lagerplatz: data.lagerplatz || null, runde_id: round.id
+        schein_id: recordId, kennzeichen: current.kennzeichen || data.kennzeichen,
+        lager: currentArea || null, lagerplatz: currentPlace || null, runde_id: round.id
       });
       if (error) throw error;
-      setNotice('Inventur: Radsatz als geprüft markiert.');
+      setAssignForInventur(false);
+      setNotice(`Inventur: Radsatz geprüft${assignPlace ? ` und Lagerplatz ${currentArea} / ${currentPlace} gespeichert` : ''}.`);
     } catch (e) { setNotice('Inventur fehlgeschlagen: ' + (e instanceof Error ? e.message : String(e))); }
     finally { setActionBusy(false); }
   }
@@ -291,11 +319,20 @@ export default function Einlagerungsschein() {
         {loaded && <button type="button" onClick={() => { window.history.replaceState({}, '', base); window.location.reload(); }}>Zurück zum Dashboard</button>}
         {loaded && <button type="button" disabled={actionBusy} onClick={() => { setShowMove(v => !v); setShowCondition(false); }}>Umlagern</button>}
         {loaded && !!data.lagerplatz && <button type="button" disabled={actionBusy} onClick={() => void releaseSet()}>Auslagern</button>}
-        {loaded && <button type="button" disabled={actionBusy} onClick={() => void markInventur()}>Inventur: geprüft</button>}
+        {loaded && <button type="button" disabled={actionBusy} onClick={() => void markInventur(false)}>Inventur: geprüft</button>}
         {loaded && <button type="button" disabled={actionBusy} onClick={() => { setShowCondition(v => !v); setShowMove(false); }}>Reifenzustand prüfen</button>}
       </div>
     </div>
 
+    {loaded && assignForInventur && <div className="no-print" style={{ background: '#fff', border: '2px solid #2563eb', borderRadius: 12, padding: 18, margin: '16px 0' }}>
+      <h2>Inventur · Lagerplatz zuweisen</h2>
+      <p>Dieser Radsatz hat noch keinen Lagerplatz. Wählen Sie einen freien Platz und speichern Sie ihn zusammen mit der Inventur-Prüfung.</p>
+      <label>Bereich <select value={targetArea} disabled={actionBusy} onChange={e => { setTargetArea(e.target.value as 'Zelt' | 'Lager'); setTargetPlace(''); }}><option value="Zelt">Zelt</option><option value="Lager">Lager</option></select></label>
+      <label style={{ marginLeft: 12 }}>Lagerplatz <select value={targetPlace} disabled={actionBusy} onChange={e => setTargetPlace(e.target.value)}><option value="">Platz wählen</option>{targetPlaces.map(p => <option key={p} value={p}>{p}</option>)}</select></label>
+      <p>Bereits belegte Plätze werden beim Speichern von der Datenbank abgelehnt.</p>
+      <button type="button" disabled={actionBusy || !targetPlace} onClick={() => void markInventur(true)}>Speichern &amp; prüfen</button>
+      <button type="button" disabled={actionBusy} style={{ marginLeft: 10 }} onClick={() => setAssignForInventur(false)}>Abbrechen</button>
+    </div>}
     {loaded && showMove && <div className="no-print" style={{ background: '#fff', border: '1px solid #cbd5e1', borderRadius: 12, padding: 18, margin: '16px 0' }}>
       <h2>Radsatz umlagern</h2>
       <label>Bereich <select value={targetArea} onChange={e => { setTargetArea(e.target.value as 'Zelt' | 'Lager'); setTargetPlace(''); }}><option value="Zelt">Zelt</option><option value="Lager">Lager</option></select></label>
