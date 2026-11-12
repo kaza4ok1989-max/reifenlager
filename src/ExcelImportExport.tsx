@@ -226,7 +226,7 @@ export default function ExcelImportExport() {
     for (let offset = 0; ; offset += 1000) {
       const { data, error } = await supabase.from(table).select(fields).range(offset, offset + 999);
       if (error) throw new Error(error.message);
-      const batch = (data || []) as CellRow[];
+      const batch = (data || []) as unknown as CellRow[];
       all.push(...batch);
       if (batch.length < 1000) break;
     }
