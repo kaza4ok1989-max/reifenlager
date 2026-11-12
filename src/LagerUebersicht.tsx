@@ -64,7 +64,6 @@ export default function LagerUebersicht({ view }: { view: 'Radsätze' | 'Lagerpl
   const selectedRows = selected ? at(selected) : [];
   const rackPlaces = regale.flatMap(n => [0, 1, 2].map(i => `${n}0${i}`));
   const warehousePlaces = Array.from({ length: 6 }, (_, r) => Array.from({ length: 6 }, (_, s) => [`R${r + 1}-${s + 1}-Unten`, `R${r + 1}-${s + 1}-Oben`])).flat(2);
-  const validPlaces = lager === 'Zelt' ? rackPlaces : warehousePlaces;
   const currentId = dragged;
   const activeDrag = rows.find(r => r.id === currentId);
 
