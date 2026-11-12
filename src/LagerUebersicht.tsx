@@ -26,6 +26,9 @@ export default function LagerUebersicht({ view }: { view: 'Radsätze' | 'Lagerpl
   const [dragged, setDragged] = useState<string | null>(null);
   const [hovered, setHovered] = useState<string | null>(null);
   const [releaseHover, setReleaseHover] = useState(false);
+  const [assignId, setAssignId] = useState<string | null>(null);
+  const [assignArea, setAssignArea] = useState<Area>('Zelt');
+  const [assignPlace, setAssignPlace] = useState('');
 
   async function refresh() {
     setBusy(true);
@@ -40,6 +43,7 @@ export default function LagerUebersicht({ view }: { view: 'Radsätze' | 'Lagerpl
     setBusy(false);
   }
   useEffect(() => { void refresh(); }, []);
+  useEffect(() => { if (assignId) document.getElementById('lager-assign')?.scrollIntoView({ behavior: 'smooth', block: 'start' }); }, [assignId]);
 
   const occupied = useMemo(() => {
     const map = new Map<string, Schein[]>();
@@ -88,19 +92,19 @@ export default function LagerUebersicht({ view }: { view: 'Radsätze' | 'Lagerpl
     setWorking(false);
   }
 
-  async function moveTo(id: string, place: string) {
+  async function moveTo(id: string, place: string, destination: Area = lager) {
     if (working) return;
     const source = rows.find(r => r.id === id);
     if (!source) { setError('Radsatz nicht gefunden. Bitte aktualisieren.'); return; }
-    if (!validPlaces.some(p => norm(p) === norm(place))) { setError('Ungültiger Lagerplatz.'); return; }
-    if (at(place).some(r => r.id !== id)) { setError('Dieser Lagerplatz ist bereits belegt! Zuerst den vorhandenen Lagerplatz freigeben.'); return; }
-    if (keyOf(source.lager, source.lagerplatz) === keyOf(lager, place)) return;
+    if (!(destination === 'Zelt' ? rackPlaces : warehousePlaces).some(p => norm(p) === norm(place))) { setError('Ungültiger Lagerplatz.'); return; }
+    if (at(place, destination).some(r => r.id !== id)) { setError('Dieser Lagerplatz ist bereits belegt! Zuerst den vorhandenen Lagerplatz freigeben.'); return; }
+    if (keyOf(source.lager, source.lagerplatz) === keyOf(destination, place)) return;
     setWorking(true); setError(''); setMessage('');
     // The database function atomically checks the destination and updates the receipt.
     // Its unique index prevents collisions even when two users move wheels simultaneously.
-    const { error: e } = await supabase.rpc('reifenlager_platz_zuweisen', { p_schein_id: id, p_lager: lager, p_lagerplatz: place });
+    const { error: e } = await supabase.rpc('reifenlager_platz_zuweisen', { p_schein_id: id, p_lager: destination, p_lagerplatz: place });
     if (e) setError('Platz nicht gespeichert: ' + e.message + ' (SQL-Update in Supabase prüfen)');
-    else { setMessage(`${source.kennzeichen || 'Radsatz'} → ${lager} / ${place} gespeichert.`); setSelected(place); }
+    else { setMessage(`${source.kennzeichen || 'Radsatz'} → ${destination} / ${place} gespeichert.`); setLager(destination); setSelected(place); setAssignId(null); setAssignPlace(''); }
     await refresh();
     setWorking(false);
   }
@@ -158,6 +162,14 @@ export default function LagerUebersicht({ view }: { view: 'Radsätze' | 'Lagerpl
     setDragged(r.id);
     setError('');
   }
+  function autoScrollWhileDragging(event: DragEvent<HTMLElement>) {
+    if (!dragged || working) return;
+    const edge = 100;
+    const speed = 32;
+    if (event.clientY < edge) window.scrollBy(0, -speed);
+    else if (event.clientY > window.innerHeight - edge) window.scrollBy(0, speed);
+  }
+
   function onDragEnd() { setDragged(null); setHovered(null); setReleaseHover(false); }
   function onDragOver(event: DragEvent<HTMLButtonElement>, place: string) {
     if (!dragged || working || at(place).some(r => r.id !== dragged)) return;
@@ -187,6 +199,10 @@ export default function LagerUebersicht({ view }: { view: 'Radsätze' | 'Lagerpl
     </button>;
   }
 
+  const assignRow = rows.find(r => r.id === assignId);
+  const assignPlaces = assignArea === 'Zelt' ? rackPlaces : warehousePlaces;
+  const freeAssignPlaces = assignPlaces.filter(p => !at(p, assignArea).some(r => r.id !== assignId));
+
   function card(r: Schein) {
     const isPlaced = r.lagerplatz?.trim() && (norm(r.lager) === 'ZELT' ? rackPlaces : warehousePlaces).some(p => norm(p) === norm(r.lagerplatz));
     return <article key={r.id} draggable={!working} onDragStart={e => onDragStart(e, r)} onDragEnd={onDragEnd}
@@ -199,13 +215,14 @@ export default function LagerUebersicht({ view }: { view: 'Radsätze' | 'Lagerpl
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
         <a href={qrUrl(r.id)} style={{ ...btn, padding: '7px 9px', textDecoration: 'none', display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 12 }}><FileText size={15} /> Schein / QR</a>
         <button type="button" style={{ ...btn, padding: '7px 9px', fontSize: 12 }} onClick={() => { setLager(norm(r.lager) === 'LAGER' ? 'Lager' : 'Zelt'); setSelected(r.lagerplatz); document.getElementById('lager-map')?.scrollIntoView({ behavior: 'smooth' }); }}>Platz anzeigen</button>
+        <button type="button" disabled={working} style={{ ...btn, padding: '7px 9px', fontSize: 12, color: '#1d4ed8' }} onClick={() => { const area: Area = norm(r.lager) === 'LAGER' ? 'Lager' : 'Zelt'; setAssignId(r.id); setAssignArea(area); setAssignPlace(''); setError(''); }}>Platz zuweisen</button>
         {r.lagerplatz?.trim() && <button type="button" disabled={working} style={{ ...btn, padding: '7px 9px', color: '#166534', fontSize: 12 }} onClick={() => void releasePlace(r.id)}>Platz freigeben</button>}
         <button type="button" disabled={working} style={{ ...btn, padding: '7px 9px', color: '#b91c1c', fontSize: 12, display: 'inline-flex', alignItems: 'center', gap: 5 }} onClick={() => void deleteSet(r)}><Trash2 size={14} /> Löschen</button>
       </div>
     </article>;
   }
 
-  return <section style={{ maxWidth: 1300 }}>
+  return <section style={{ maxWidth: 1300 }} onDragOver={autoScrollWhileDragging}>
     <h1>{view === 'Lagerplan' ? 'Lagerplan' : 'Radsätze'}</h1>
     <p style={{ color: '#64748b' }}>Radsätze per Drag & Drop einlagern und wieder herausnehmen. Belegte Plätze können nicht überschrieben werden.</p>
     <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginBottom: 16 }}>
@@ -215,6 +232,27 @@ export default function LagerUebersicht({ view }: { view: 'Radsätze' | 'Lagerpl
     {error && <p role="alert" style={{ color: '#b91c1c', fontWeight: 600 }}>{error}</p>}
     {message && <p role="status" style={{ color: '#166534' }}>{message}</p>}
     {busy && <p>Laden...</p>}
+    <div id="lager-assign" />
+    {assignRow && <div style={{ background: '#fff', border: '2px solid #2563eb', borderRadius: 12, padding: 18, margin: '16px 0' }}>
+      <h2 style={{ marginTop: 0 }}>Lagerplatz zuweisen · {assignRow.kennzeichen || assignRow.belegnummer || 'Radsatz'}</h2>
+      <p style={{ fontSize: 13, color: '#64748b' }}>Aktueller Platz: {assignRow.lagerplatz?.trim() ? `${assignRow.lager} / ${assignRow.lagerplatz}` : 'Nicht zugeordnet'}. Nur freie Plätze stehen zur Auswahl.</p>
+      <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'end' }}>
+        <label style={{ display: 'grid', gap: 5 }}>Bereich
+          <select value={assignArea} onChange={e => { setAssignArea(e.target.value as Area); setAssignPlace(''); }} style={{ padding: 10, borderRadius: 8, border: '1px solid #cbd5e1' }}>
+            <option value="Zelt">Zelt</option><option value="Lager">Lager</option>
+          </select>
+        </label>
+        <label style={{ display: 'grid', gap: 5 }}>Freier Lagerplatz
+          <select value={assignPlace} onChange={e => setAssignPlace(e.target.value)} style={{ padding: 10, borderRadius: 8, border: '1px solid #cbd5e1', minWidth: 180 }}>
+            <option value="">Bitte auswählen</option>
+            {freeAssignPlaces.map(p => <option key={p} value={p}>{p}</option>)}
+          </select>
+        </label>
+        <button type="button" style={{ ...btn, background: '#12365a', color: '#fff' }} disabled={working || !assignPlace} onClick={() => { if (assignId && assignPlace) void moveTo(assignId, assignPlace, assignArea); }}>Speichern</button>
+        <button type="button" style={btn} onClick={() => { setAssignId(null); setAssignPlace(''); }}>Abbrechen</button>
+      </div>
+      {!freeAssignPlaces.length && <p style={{ color: '#b91c1c' }}>Keine freien Lagerplätze in diesem Bereich.</p>}
+    </div>}
     <div id="lager-map" style={{ marginTop: 18 }}>
       <h2>Lagerplan</h2>
       <div style={{ display: 'flex', gap: 8, marginBottom: 14 }}>{(['Zelt', 'Lager'] as const).map(x => <button key={x} type="button" style={{ ...btn, background: lager === x ? '#12365a' : '#fff', color: lager === x ? '#fff' : '#12365a' }} onClick={() => { setLager(x); setSelected(null); }}>{x}</button>)}</div>
