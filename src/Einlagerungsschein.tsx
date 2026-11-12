@@ -227,13 +227,17 @@ export default function Einlagerungsschein() {
     if (!recordId || actionBusy) return;
     setActionBusy(true); setNotice('');
     try {
+      const { data: round, error: roundError } = await supabase.from('reifenlager_inventur_runden')
+        .select('id').is('abgeschlossen_am', null).order('gestartet_am', { ascending: false }).limit(1).maybeSingle();
+      if (roundError) throw new Error(roundError.message);
+      if (!round) throw new Error('Keine aktive Inventur. Bitte im Menü Inventur eine neue Runde starten.');
       const { error } = await supabase.from('reifenlager_inventur').insert({
         schein_id: recordId, kennzeichen: data.kennzeichen, lager: data.lager || null,
-        lagerplatz: data.lagerplatz || null
+        lagerplatz: data.lagerplatz || null, runde_id: round.id
       });
       if (error) throw error;
       setNotice('Inventur: Radsatz als geprüft markiert.');
-    } catch (e) { setNotice('Inventur fehlgeschlagen. Ist inventur.sql ausgeführt? ' + (e instanceof Error ? e.message : String(e))); }
+    } catch (e) { setNotice('Inventur fehlgeschlagen: ' + (e instanceof Error ? e.message : String(e))); }
     finally { setActionBusy(false); }
   }
 

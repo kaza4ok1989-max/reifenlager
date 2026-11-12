@@ -4,6 +4,7 @@ import { ClipboardCheck, RefreshCw, Download, Search } from 'lucide-react';
 
 type SetRow = { id: string; kennzeichen: string | null; belegnummer: string | null; lager: string | null; lagerplatz: string | null; daten: Record<string, unknown> | null };
 type CheckRow = { schein_id: string; kennzeichen: string | null; lager: string | null; lagerplatz: string | null; geprueft_am: string };
+type Round = { id: string; name: string; gestartet_am: string; abgeschlossen_am: string | null };
 type Filter = 'all' | 'checked' | 'unchecked' | 'different' | 'unassigned';
 const box: React.CSSProperties = { background: '#fff', border: '1px solid #dbe3ee', borderRadius: 12, padding: 16 };
 const btn: React.CSSProperties = { background: '#12365a', color: 'white', border: 0, borderRadius: 8, padding: '10px 14px', cursor: 'pointer', fontWeight: 700 };
@@ -18,7 +19,10 @@ export default function Inventur() {
   const [error, setError] = useState('');
   const [query, setQuery] = useState('');
   const [filter, setFilter] = useState<Filter>('all');
-  const [period, setPeriod] = useState(() => new Date().toLocaleDateString('en-CA').slice(0, 7));
+  const [rounds, setRounds] = useState<Round[]>([]);
+  const [roundId, setRoundId] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState('');
 
   async function refresh() {
     setLoading(true); setError('');
@@ -31,13 +35,17 @@ export default function Inventur() {
         allSets.push(...batch);
         if (batch.length < 1000) break;
       }
-      const from = `${period}-01T00:00:00`;
-      const [year, month] = period.split('-').map(Number);
-      const to = new Date(Date.UTC(year, month, 1)).toISOString();
-      for (let start = 0; ; start += 1000) {
+      const { data: roundData, error: roundError } = await supabase.from('reifenlager_inventur_runden')
+        .select('id,name,gestartet_am,abgeschlossen_am').order('gestartet_am', { ascending: false });
+      if (roundError) throw roundError;
+      const available = (roundData || []) as Round[];
+      setRounds(available);
+      const selected = available.find(r => r.id === roundId) || available.find(r => !r.abgeschlossen_am) || available[0];
+      if (selected && selected.id !== roundId) setRoundId(selected.id);
+      for (let start = 0; selected; start += 1000) {
         const { data, error: e } = await supabase.from('reifenlager_inventur')
           .select('schein_id,kennzeichen,lager,lagerplatz,geprueft_am')
-          .gte('geprueft_am', from).lt('geprueft_am', to)
+          .eq('runde_id', selected.id)
           .order('geprueft_am', { ascending: false }).range(start, start + 999);
         if (e) throw e;
         const batch = (data || []) as CheckRow[];
@@ -48,7 +56,31 @@ export default function Inventur() {
     } catch (e) { setError(e instanceof Error ? e.message : String(e)); }
     finally { setLoading(false); }
   }
-  useEffect(() => { void refresh(); }, [period]);
+  useEffect(() => { void refresh(); }, [roundId]);
+  const selectedRound = rounds.find(r => r.id === roundId);
+  async function startRound() {
+    if (!window.confirm('Neue Inventur starten? Die bisherige Runde wird abgeschlossen und bleibt gespeichert.')) return;
+    setBusy(true); setError(''); setMessage('');
+    try {
+      const { data, error: e } = await supabase.rpc('besico_inventur_start');
+      if (e) throw e;
+      setRoundId(String(data)); setMessage('Neue Inventur gestartet.');
+      // Der Wechsel der Runde lädt die Daten automatisch neu.
+    } catch (e) { setError(e instanceof Error ? e.message : String(e)); }
+    finally { setBusy(false); }
+  }
+  async function finishRound() {
+    if (!selectedRound || selectedRound.abgeschlossen_am) return;
+    if (!window.confirm('Inventur abschließen? Danach sind keine weiteren QR-Prüfungen für diese Runde möglich.')) return;
+    setBusy(true); setError(''); setMessage('');
+    try {
+      const { error: e } = await supabase.rpc('besico_inventur_finish', { p_id: selectedRound.id });
+      if (e) throw e;
+      setMessage('Inventur abgeschlossen und gespeichert.');
+      await refresh();
+    } catch (e) { setError(e instanceof Error ? e.message : String(e)); }
+    finally { setBusy(false); }
+  }
 
   const latest = useMemo(() => {
     const map = new Map<string, CheckRow>();
@@ -81,17 +113,23 @@ export default function Inventur() {
     ])].map(line => line.map(esc).join(';')).join('\r\n');
     const blob = new Blob(['\ufeff' + data], { type: 'text/csv;charset=utf-8' });
     const url = URL.createObjectURL(blob);
-    const a = document.createElement('a'); a.href = url; a.download = `BESICO_Inventur_${period}.csv`; a.click();
+    const a = document.createElement('a'); a.href = url; a.download = `BESICO_Inventur_${selectedRound?.name.replace(/[^a-zA-Z0-9_-]/g, "_") || "Export"}.csv`; a.click();
     URL.revokeObjectURL(url);
   }
   const openQr = (id: string) => window.location.assign(`${window.location.origin}${import.meta.env.BASE_URL}?qr=${encodeURIComponent(id)}`);
   return <section style={{ display: 'grid', gap: 18 }}>
-    <div><h1 style={{ marginBottom: 4 }}>Inventur</h1><p style={{ marginTop: 0, color: '#64748b' }}>Bestandskontrolle · QR-Prüfungen im gewählten Monat</p></div>
+    <div><h1 style={{ marginBottom: 4 }}>Inventur</h1><p style={{ marginTop: 0, color: '#64748b' }}>Bestandskontrolle · Inventur-Runden mit gespeicherter Historie</p></div>
     <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, alignItems: 'center' }}>
-      <label>Prüfmonat <input type="month" value={period} onChange={e => setPeriod(e.target.value)} style={{ marginLeft: 8, padding: 8 }} /></label>
+      <label>Inventur-Runde <select value={roundId} onChange={e => setRoundId(e.target.value)} style={{ marginLeft: 8, padding: 9, borderRadius: 8 }}>
+        {rounds.map(r => <option key={r.id} value={r.id}>{r.name} · {r.abgeschlossen_am ? 'Abgeschlossen' : 'Aktiv'}</option>)}
+      </select></label>
+      <button type="button" onClick={() => void startRound()} disabled={busy || loading} style={btn}>Neue Inventur starten</button>
+      <button type="button" onClick={() => void finishRound()} disabled={busy || loading || !selectedRound || !!selectedRound.abgeschlossen_am} style={btn}>Inventur abschließen</button>
       <button type="button" onClick={() => void refresh()} style={btn}><RefreshCw size={15} style={{ verticalAlign: 'middle' }} /> Aktualisieren</button>
       <button type="button" onClick={exportCsv} disabled={loading || !!error} style={btn}><Download size={15} style={{ verticalAlign: 'middle' }} /> Excel / CSV exportieren</button>
     </div>
+    {message && <p role="status" style={{ color: '#15803d' }}>{message}</p>}
+    {selectedRound && <p style={{ margin: 0, color: '#64748b' }}>Status: <strong>{selectedRound.abgeschlossen_am ? 'Abgeschlossen' : 'Aktiv'}</strong> · {selectedRound.name}</p>}
     {error && <p role="alert" style={{ color: '#b91c1c' }}>Fehler beim Laden: {error}</p>}
     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(145px,1fr))', gap: 10 }}>
       {([['Radsätze gesamt', rows.length], ['Geprüft', checked], ['Nicht geprüft', rows.length - checked], ['Ohne Lagerplatz', unassigned], ['Platz abweichend', different]] as const).map(([label, count]) =>
