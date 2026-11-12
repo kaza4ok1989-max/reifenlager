@@ -5,7 +5,8 @@ import { supabase } from './supabase';
 import Einlagerungsschein from './Einlagerungsschein';
 import LagerUebersicht from './LagerUebersicht';
 import ExcelImportExport from './ExcelImportExport';
-import { Search, Warehouse, FileText, History, FileSpreadsheet, LayoutDashboard, LogOut, ArrowLeft, RefreshCw, Plus } from 'lucide-react';
+import Historie from './Historie';
+import { Search, Warehouse, FileText, History, FileSpreadsheet, LayoutDashboard, LogOut, RefreshCw, Plus } from 'lucide-react';
 
 const ADMIN_UID = '103ca84c-cb46-440f-a1df-b95c8b1b8e52';
 type RecordData = Record<string, unknown>;
@@ -164,7 +165,7 @@ export default function App() {
         {page === 'Lagerplan' && <LagerUebersicht view="Lagerplan" />}
         {page === 'Einlagerungsscheine' && <Einlagerungsschein />}
         {page === 'Excel Import / Export' && <ExcelImportExport />}
-        {page === 'Historie' && <><button type="button" style={{ ...button, background: '#e2e8f0', color: '#12365a' }} onClick={() => navigate('Dashboard')}><ArrowLeft size={16} /> Dashboard</button><div className="welcome" style={{ marginTop: 24 }}><h1>Historie</h1><p>Dieser Bereich wird im nächsten Schritt eingerichtet.</p></div></>}
+        {page === 'Historie' && <Historie />}
       </main>
     </div>
   </div>;
