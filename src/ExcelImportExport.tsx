@@ -13,7 +13,24 @@ const columns: Record<Kind, string[]> = {
 const style: CSSProperties = { background: '#fff', border: '1px solid #dbe3ee', borderRadius: 12, padding: 18, marginBottom: 16 };
 const button: CSSProperties = { border: '1px solid #12365a', borderRadius: 8, padding: '10px 14px', background: '#12365a', color: '#fff', cursor: 'pointer', fontWeight: 700 };
 const text = (v: unknown) => String(v ?? '').trim();
-const normalize = (v: unknown) => text(v).toUpperCase().replace(/\s+/g, '');
+const normalize = (v: unknown) => text(v).toUpperCase().replace(/[^A-Z0-9]/g, '');
+const identity = (r: CellRow) => {
+  const d = (r.daten && typeof r.daten === 'object' && !Array.isArray(r.daten) ? r.daten : r) as CellRow;
+  const plate = normalize(r.kennzeichen);
+  const vin = normalize(pick(d, 'vin', 'fin', 'fahrgestellnummer', 'fahrzeug'));
+  const season = normalize(pick(d, 'saison', 'radart'));
+  const size = normalize(pick(d, 'reifengroesse', 'reifengröße'));
+  return { plate, vin, season, size };
+};
+const comparable = (a: ReturnType<typeof identity>, b: ReturnType<typeof identity>) => {
+  if (!a.plate || !b.plate || a.plate !== b.plate) return 'none';
+  if (a.vin && b.vin && a.vin !== b.vin) return 'none';
+  if (a.season && b.season && a.season !== b.season) return 'none';
+  if (a.size && b.size && a.size !== b.size) return 'none';
+  // A matching plate alone is not sufficient: summer and winter sets can coexist.
+  return a.vin && b.vin && a.season && b.season && a.size && b.size ? 'match' : 'possible';
+};
+type ImportCheck = { state: 'Neu' | 'Bereits vorhanden' | 'Prüfen'; reason: string };
 const pick = (d: CellRow, ...keys: string[]) => { for (const key of keys) { const value = text(d[key]); if (value) return value; } return ''; };
 const dateGerman = (value: unknown) => {
   const s = text(value);
@@ -42,6 +59,8 @@ export default function ExcelImportExport() {
   const [working, setWorking] = useState(false);
   const [filename, setFilename] = useState('');
   const [legacyImport, setLegacyImport] = useState(false);
+  const [checks, setChecks] = useState<ImportCheck[]>([]);
+  const [checking, setChecking] = useState(false);
 
   async function fetchData() {
     const [vehicles, receipts] = await Promise.all([
@@ -175,7 +194,7 @@ export default function ExcelImportExport() {
 
   async function chooseFile(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
-    setPreview([]); setErrors([]); setStatus(''); setFilename(file?.name || ''); setLegacyImport(false);
+    setPreview([]); setChecks([]); setErrors([]); setStatus(''); setFilename(file?.name || ''); setLegacyImport(false);
     if (!file) return;
     try {
       const workbook = XLSX.read(await file.arrayBuffer(), { type: 'array', cellDates: false });
@@ -190,40 +209,103 @@ export default function ExcelImportExport() {
       const required = kind === 'Fahrzeuge' ? ['kennzeichen'] : ['belegnummer', 'kennzeichen'];
       const missing = required.filter(c => !Object.keys(rows[0]).includes(c));
       if (missing.length) throw new Error(`Fehlende Spalten: ${missing.join(', ')}. Bitte den vollständigen Backup-Export als Vorlage verwenden.`);
+      setChecking(true);
+      const evaluated = await classifyRows(rows, kind);
+      setChecks(evaluated);
       setPreview(rows);
-      setStatus(`${rows.length} Zeilen eingelesen${legacy ? ' (alte Lagerliste erkannt)' : ''}. Bitte Vorschau prüfen. Lagerplätze werden NICHT übernommen. Noch nichts gespeichert.`);
+      setStatus(`${rows.length} Zeilen geprüft. Neu: ${evaluated.filter(x => x.state === 'Neu').length}; vorhanden: ${evaluated.filter(x => x.state === 'Bereits vorhanden').length}; manuell prüfen: ${evaluated.filter(x => x.state === 'Prüfen').length}. Noch nichts gespeichert.`);
     } catch (e) { setErrors([e instanceof Error ? e.message : String(e)]); }
+    setChecking(false);
     event.target.value = '';
   }
 
+  async function loadExisting(kindToLoad: Kind): Promise<CellRow[]> {
+    const table = kindToLoad === 'Fahrzeuge' ? 'fahrzeuge' : 'reifenlager_scheine';
+    const fields = kindToLoad === 'Fahrzeuge' ? 'kennzeichen,vin' : 'belegnummer,kennzeichen,daten';
+    const all: CellRow[] = [];
+    for (let offset = 0; ; offset += 1000) {
+      const { data, error } = await supabase.from(table).select(fields).range(offset, offset + 999);
+      if (error) throw new Error(error.message);
+      const batch = (data || []) as CellRow[];
+      all.push(...batch);
+      if (batch.length < 1000) break;
+    }
+    return all;
+  }
+
+  function classify(row: CellRow, existing: CellRow[], alreadyInFile: CellRow[], kindToCheck: Kind): ImportCheck {
+    if (kindToCheck === 'Fahrzeuge') {
+      const plate = normalize(row.kennzeichen);
+      if (!plate) return { state: 'Prüfen', reason: 'Kennzeichen fehlt' };
+      if ([...existing, ...alreadyInFile].some(r => normalize(r.kennzeichen) === plate))
+        return { state: 'Bereits vorhanden', reason: 'Kennzeichen bereits vorhanden' };
+      return { state: 'Neu', reason: 'Neues Fahrzeug' };
+    }
+    const number = normalize(row.belegnummer);
+    const plate = normalize(row.kennzeichen);
+    if (!number || !plate) return { state: 'Prüfen', reason: 'Belegnummer oder Kennzeichen fehlt' };
+    const candidates = [...existing, ...alreadyInFile];
+    if (candidates.some(r => normalize(r.belegnummer) === number))
+      return { state: 'Bereits vorhanden', reason: 'Belegnummer bereits vorhanden' };
+    const id = identity(row);
+    const matches = candidates.map(r => comparable(id, identity(r)));
+    if (matches.includes('match'))
+      return { state: 'Prüfen', reason: 'Gleiche Fahrzeug-/Reifendaten, andere Belegnummer: manuell prüfen' };
+    if (matches.includes('possible'))
+      return { state: 'Prüfen', reason: 'Mögliche Übereinstimmung: Angaben nicht eindeutig' };
+    return { state: 'Neu', reason: 'Kein Treffer' };
+  }
+
+  async function classifyRows(rows: CellRow[], kindToCheck: Kind): Promise<ImportCheck[]> {
+    const existing = await loadExisting(kindToCheck);
+    const checked: CellRow[] = [];
+    return rows.map(row => {
+      const result = classify(row, existing, checked, kindToCheck);
+      if (result.state === 'Neu') checked.push(row);
+      return result;
+    });
+  }
+
   async function importExcel() {
-    if (!preview.length || working) return;
-    if (!window.confirm(`${preview.length} Zeilen aus ${filename} nach Supabase importieren? Vorhandene Datensätze werden NICHT überschrieben.`)) return;
-    setWorking(true); setErrors([]); setStatus('Import läuft...');
+    if (!preview.length || working || checking) return;
+    setWorking(true); setErrors([]); setStatus('Datenbank wird erneut geprüft...');
     const issues: string[] = [];
-    let added = 0, skipped = 0;
+    let added = 0, skipped = 0, review = 0;
     try {
-      if (kind === 'Fahrzeuge') {
-        const existing = await supabase.from('fahrzeuge').select('kennzeichen');
-        if (existing.error) throw new Error(existing.error.message);
-        const seen = new Set((existing.data || []).map(r => normalize(r.kennzeichen)));
-        for (let i = 0; i < preview.length; i++) {
-          const row = preview[i], plate = normalize(row.kennzeichen);
-          if (!plate) { issues.push(`Zeile ${i + 2}: Kennzeichen fehlt.`); continue; }
-          if (seen.has(plate)) { skipped++; continue; }
+      // Always recheck immediately before writing, not only when the file was selected.
+      const existing = await loadExisting(kind);
+      const seenInThisImport: CellRow[] = [];
+      const current = preview.map(row => {
+        const result = classify(row, existing, seenInThisImport, kind);
+        if (result.state === 'Neu') seenInThisImport.push(row);
+        return result;
+      });
+      setChecks(current);
+      const newCount = current.filter(x => x.state === 'Neu').length;
+      const skippedCount = current.filter(x => x.state === 'Bereits vorhanden').length;
+      const reviewCount = current.filter(x => x.state === 'Prüfen').length;
+      if (!newCount) {
+        setStatus(`Keine sicheren neuen Einträge. ${skippedCount} bereits vorhanden, ${reviewCount} manuell prüfen. Nichts gespeichert.`);
+        return;
+      }
+      if (!window.confirm(`${newCount} neue Einträge importieren?\n${skippedCount} Duplikate überspringen\n${reviewCount} unklare Einträge NICHT importieren\nLagerplätze werden nicht übernommen.`)) {
+        setStatus('Import abgebrochen. Nichts gespeichert.');
+        return;
+      }
+      const accepted: CellRow[] = [];
+      for (let i = 0; i < preview.length; i++) {
+        const row = preview[i];
+        const check = classify(row, existing, accepted, kind);
+        if (check.state === 'Bereits vorhanden') { skipped++; continue; }
+        if (check.state === 'Prüfen') { review++; continue; }
+        if (kind === 'Fahrzeuge') {
+          const plate = normalize(row.kennzeichen);
           const payload = Object.fromEntries(columns.Fahrzeuge.map(k => [k, k === 'kennzeichen' ? plate : text(row[k]) || null]));
           const { error } = await supabase.from('fahrzeuge').insert(payload);
           if (error) issues.push(`Zeile ${i + 2}: ${error.message}`);
-          else { added++; seen.add(plate); }
-        }
-      } else {
-        const existing = await supabase.from('reifenlager_scheine').select('belegnummer');
-        if (existing.error) throw new Error(existing.error.message);
-        const seen = new Set((existing.data || []).map(r => normalize(r.belegnummer)).filter(Boolean));
-        for (let i = 0; i < preview.length; i++) {
-          const row = preview[i], number = text(row.belegnummer), plate = normalize(row.kennzeichen);
-          if (!number || !plate) { issues.push(`Zeile ${i + 2}: Belegnummer oder Kennzeichen fehlt.`); continue; }
-          if (seen.has(normalize(number))) { skipped++; continue; }
+          else { added++; accepted.push(row); }
+        } else {
+          const number = text(row.belegnummer), plate = text(row.kennzeichen).toUpperCase();
           const payload = { belegnummer: number, kennzeichen: plate, lager: '', lagerplatz: '', daten: {
             kundenname: text(row.kundenname), fahrzeug: text(row.fahrzeug), saison: text(row.saison),
             reifengroesse: text(row.reifengroesse), reifenbezeichnung: text(row.reifenbezeichnung),
@@ -234,12 +316,12 @@ export default function ExcelImportExport() {
           } };
           const { error } = await supabase.from('reifenlager_scheine').insert(payload);
           if (error) issues.push(`Zeile ${i + 2}: ${error.message}`);
-          else { added++; seen.add(normalize(number)); }
+          else { added++; accepted.push(row); }
         }
       }
-      setStatus(`Fertig: ${added} importiert, ${skipped} Duplikate übersprungen, ${issues.length} Fehler.`);
+      setStatus(`Fertig: ${added} importiert, ${skipped} Duplikate übersprungen, ${review} zur manuellen Prüfung, ${issues.length} Fehler.`);
       setErrors(issues);
-      setPreview([]);
+      setPreview([]); setChecks([]);
     } catch (e) { setErrors([e instanceof Error ? e.message : String(e)]); setStatus('Import abgebrochen.'); }
     finally { setWorking(false); }
   }
@@ -259,15 +341,15 @@ export default function ExcelImportExport() {
     </div>
     <div style={style}>
       <h2>Excel Import</h2>
-      <p>Nur neue Datensätze. Bereits vorhandene Kennzeichen (Fahrzeuge) bzw. Belegnummern (Radsätze) werden übersprungen. Radsätze werden ohne Lagerplatz importiert. Auch die alte Lagerliste mit Nr., Bereich, Lagerplatz usw. wird erkannt. Alte Lagerplätze werden nur als Information gespeichert und NICHT zugewiesen.</p>
+      <p>Nur neue Datensätze. Bereits vorhandene Kennzeichen (Fahrzeuge) bzw. Belegnummern (Radsätze) werden übersprungen. Ähnliche Radsätze mit anderer Belegnummer werden zur manuellen Prüfung zurückgestellt. Radsätze werden ohne Lagerplatz importiert. Auch die alte Lagerliste mit Nr., Bereich, Lagerplatz usw. wird erkannt. Alte Lagerplätze werden nur als Information gespeichert und NICHT zugewiesen.</p>
       <label style={{ display: 'block', marginBottom: 12 }}>Datenart: <select value={kind} disabled={working} onChange={e => { setKind(e.target.value as Kind); setPreview([]); setStatus(''); setErrors([]); }} style={{ padding: 8, marginLeft: 8 }}><option value="Fahrzeuge">Fahrzeuge</option><option value="Radsaetze">Radsätze</option></select></label>
       <input type="file" accept=".xlsx,.xls" disabled={working} onChange={e => void chooseFile(e)} aria-label="Excel-Datei auswählen" />
       {legacyImport && preview.length > 0 && <p style={{ color: '#92400e', fontWeight: 600 }}>Alte Lagerliste erkannt. Alle neuen Radsätze werden ohne Lagerplatz angelegt. Fehlende Kennzeichen erhalten die Kennung OHNE-KZ-...; bitte später prüfen.</p>}
       {preview.length > 0 && <>
         <h3>Vorschau: {preview.length} Zeilen ({filename})</h3>
-        <div style={{ overflowX: 'auto', maxHeight: 340, overflowY: 'auto', marginBottom: 12 }}><table style={{ borderCollapse: 'collapse', fontSize: 13 }}><thead><tr>{(legacyImport ? [...columns[kind], 'reifengroesse', 'reifenbezeichnung', 'fahrzeugstandort', 'bemerkung', 'lagerplatz_alt'] : columns[kind]).map(k => <th key={k} style={{ padding: 8, border: '1px solid #cbd5e1', textAlign: 'left' }}>{k}</th>)}</tr></thead><tbody>{preview.slice(0, 20).map((r, i) => <tr key={i}>{(legacyImport ? [...columns[kind], 'reifengroesse', 'reifenbezeichnung', 'fahrzeugstandort', 'bemerkung', 'lagerplatz_alt'] : columns[kind]).map(k => <td key={k} style={{ padding: 8, border: '1px solid #e2e8f0' }}>{text(r[k])}</td>)}</tr>)}</tbody></table></div>
+        <div style={{ overflowX: 'auto', maxHeight: 340, overflowY: 'auto', marginBottom: 12 }}><table style={{ borderCollapse: 'collapse', fontSize: 13 }}><thead><tr><th style={{ padding: 8, border: '1px solid #cbd5e1' }}>Status</th>{(legacyImport ? [...columns[kind], 'reifengroesse', 'reifenbezeichnung', 'fahrzeugstandort', 'bemerkung', 'lagerplatz_alt'] : columns[kind]).map(k => <th key={k} style={{ padding: 8, border: '1px solid #cbd5e1', textAlign: 'left' }}>{k}</th>)}</tr></thead><tbody>{preview.slice(0, 20).map((r, i) => <tr key={i}><td style={{ padding: 8, border: '1px solid #e2e8f0', color: checks[i]?.state === 'Neu' ? '#166534' : '#92400e' }} title={checks[i]?.reason}>{checks[i]?.state}</td>{(legacyImport ? [...columns[kind], 'reifengroesse', 'reifenbezeichnung', 'fahrzeugstandort', 'bemerkung', 'lagerplatz_alt'] : columns[kind]).map(k => <td key={k} style={{ padding: 8, border: '1px solid #e2e8f0' }}>{text(r[k])}</td>)}</tr>)}</tbody></table></div>
         {preview.length > 20 && <p>Vorschau zeigt die ersten 20 Zeilen.</p>}
-        <button type="button" disabled={working} style={button} onClick={() => void importExcel()}>{working ? 'Import läuft...' : `${preview.length} Zeilen importieren`}</button>
+        <button type="button" disabled={working || checking || !checks.some(c => c.state === 'Neu')} style={button} onClick={() => void importExcel()}>{working ? 'Import läuft...' : `${checks.filter(c => c.state === 'Neu').length} neue Einträge importieren`}</button>
       </>}
     </div>
     {status && <p role="status" style={{ color: '#166534', fontWeight: 600 }}>{status}</p>}
