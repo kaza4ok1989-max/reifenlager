@@ -18,6 +18,8 @@ const menu = [
   { title: 'Excel Import / Export', icon: FileSpreadsheet },
 ];
 const text = (value: unknown): string => typeof value === 'string' || typeof value === 'number' ? String(value).trim() : '';
+// Ignore spaces, punctuation and letter case when searching plates and tyre sizes.
+const normalizeSearch = (value: unknown): string => text(value).toLocaleLowerCase().normalize('NFKD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]/g, '');
 const card: CSSProperties = { background: '#fff', border: '1px solid #dbe3ee', borderRadius: 12, padding: 16 };
 const button: CSSProperties = { border: 0, background: '#12365a', color: '#fff', borderRadius: 8, padding: '10px 14px', cursor: 'pointer', fontWeight: 700 };
 
@@ -84,15 +86,17 @@ export default function App() {
     window.location.assign(url);
   }
 
-  const query = search.trim().toLocaleLowerCase();
+  const query = normalizeSearch(search);
   const filtered = query ? radsatzList.filter(r => {
     const d = r.daten || {};
-    return [r.kennzeichen, r.belegnummer, r.lager, r.lagerplatz,
+    const values = [r.kennzeichen, r.belegnummer, r.lager, r.lagerplatz,
       d.fahrzeug, d.vin, d.fin, d.fahrgestellnummer, d.kundenname,
       d.reifengroesse, d.reifenmarke, d.reifenbezeichnung, d.saison,
       d.bemerkung, d.fahrzeugstandort, d.auto, d.marke, d.modell,
-      ...Object.values(d).filter(v => typeof v === 'string' || typeof v === 'number')]
-      .map(text).join(' ').toLocaleLowerCase().includes(query);
+      ...Object.values(d).filter(v => typeof v === 'string' || typeof v === 'number')];
+    // Match inside each value so '235 55' matches '235/55 R19', and
+    // 'GC-S 120' matches 'GC-S120', without merging unrelated fields.
+    return values.some(value => normalizeSearch(value).includes(query));
   }) : [];
   const assigned = radsatzList.filter(r => (r.lager === 'Zelt' || r.lager === 'Lager') && !!text(r.lagerplatz));
   const zelt = assigned.filter(r => r.lager === 'Zelt').length;
