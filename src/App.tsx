@@ -6,7 +6,8 @@ import Einlagerungsschein from './Einlagerungsschein';
 import LagerUebersicht from './LagerUebersicht';
 import ExcelImportExport from './ExcelImportExport';
 import Historie from './Historie';
-import { Search, Warehouse, FileText, History, FileSpreadsheet, LayoutDashboard, LogOut, RefreshCw, Plus } from 'lucide-react';
+import Inventur from './Inventur';
+import { Search, Warehouse, FileText, History, FileSpreadsheet, LayoutDashboard, LogOut, RefreshCw, Plus, ClipboardCheck } from 'lucide-react';
 
 const ADMIN_UID = '103ca84c-cb46-440f-a1df-b95c8b1b8e52';
 type RecordData = Record<string, unknown>;
@@ -14,6 +15,7 @@ type Radsatz = { id: string; kennzeichen: string | null; belegnummer: string | n
 const menu = [
   { title: 'Dashboard', icon: LayoutDashboard },
   { title: 'Lagerplan', icon: Warehouse },
+  { title: 'Inventur', icon: ClipboardCheck },
   { title: 'Einlagerungsscheine', icon: FileText },
   { title: 'Historie', icon: History },
   { title: 'Excel Import / Export', icon: FileSpreadsheet },
@@ -163,6 +165,7 @@ export default function App() {
           <div className="notice" style={{ marginTop: 20 }}><strong>Datenbank verbunden</strong><p>Radsätze werden aus Supabase geladen. Die Zahlen beziehen sich auf gespeicherte Radsätze.</p></div>
         </>}
         {page === 'Lagerplan' && <LagerUebersicht view="Lagerplan" />}
+        {page === 'Inventur' && <Inventur />}
         {page === 'Einlagerungsscheine' && <Einlagerungsschein />}
         {page === 'Excel Import / Export' && <ExcelImportExport />}
         {page === 'Historie' && <Historie />}
