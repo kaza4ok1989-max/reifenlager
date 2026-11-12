@@ -7,6 +7,7 @@ type Schein = { id: string; belegnummer: string | null; kennzeichen: string; lag
 type Area = 'Zelt' | 'Lager';
 const btn: CSSProperties = { border: '1px solid #cbd5e1', background: '#fff', borderRadius: 8, padding: '9px 12px', cursor: 'pointer', color: '#12365a', fontWeight: 600 };
 const norm = (s: string | null | undefined) => (s ?? '').trim().toUpperCase().replace(/\s+/g, '');
+const searchNorm = (s: string) => s.toUpperCase().replace(/[^A-Z0-9]/g, '');
 const field = (r: Schein, key: string) => String(r.daten?.[key] ?? '').trim();
 const qrUrl = (id: string) => `${window.location.origin}${import.meta.env.BASE_URL}?qr=${encodeURIComponent(id)}`;
 const keyOf = (area: string, place: string) => `${norm(area)}::${norm(place)}`;
@@ -50,7 +51,12 @@ export default function LagerUebersicht({ view }: { view: 'Radsätze' | 'Lagerpl
     return map;
   }, [rows]);
   const at = (place: string, area: Area = lager) => occupied.get(keyOf(area, place)) ?? [];
-  const filtered = rows.filter(r => [r.kennzeichen, r.belegnummer, r.lager, r.lagerplatz, field(r, 'kundenname'), field(r, 'fahrzeug')].join(' ').toLowerCase().includes(query.trim().toLowerCase()));
+  const filtered = rows.filter(r => {
+    const values = [r.kennzeichen, r.belegnummer, r.lager, r.lagerplatz, ...Object.values(r.daten ?? {}).filter(v => typeof v === 'string')];
+    const words = query.trim().split(/\s+/).filter(Boolean);
+    const combined = searchNorm(values.join(' '));
+    return words.every(word => combined.includes(searchNorm(word)));
+  });
   const selectedRows = selected ? at(selected) : [];
   const rackPlaces = regale.flatMap(n => [0, 1, 2].map(i => `${n}0${i}`));
   const warehousePlaces = Array.from({ length: 6 }, (_, r) => Array.from({ length: 6 }, (_, s) => [`R${r + 1}-${s + 1}-Unten`, `R${r + 1}-${s + 1}-Oben`])).flat(2);
