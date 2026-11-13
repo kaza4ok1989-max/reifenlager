@@ -29,6 +29,7 @@ export default function LagerUebersicht({ view }: { view: 'Radsätze' | 'Lagerpl
   const [assignId, setAssignId] = useState<string | null>(null);
   const [assignArea, setAssignArea] = useState<Area>('Zelt');
   const [assignPlace, setAssignPlace] = useState('');
+  const [highlightedId, setHighlightedId] = useState<string | null>(null);
 
   async function refresh() {
     setBusy(true);
@@ -44,6 +45,15 @@ export default function LagerUebersicht({ view }: { view: 'Radsätze' | 'Lagerpl
   }
   useEffect(() => { void refresh(); }, []);
   useEffect(() => { if (assignId) document.getElementById('lager-assign')?.scrollIntoView({ behavior: 'smooth', block: 'start' }); }, [assignId]);
+  useEffect(() => {
+    if (!highlightedId) return;
+    // Wait until a cleared search filter has rendered the target card.
+    const scrollTimer = window.setTimeout(() => {
+      document.getElementById(`radsatz-card-${highlightedId}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }, 80);
+    const clearTimer = window.setTimeout(() => setHighlightedId(null), 5000);
+    return () => { window.clearTimeout(scrollTimer); window.clearTimeout(clearTimer); };
+  }, [highlightedId]);
 
   const occupied = useMemo(() => {
     const map = new Map<string, Schein[]>();
@@ -184,14 +194,22 @@ export default function LagerUebersicht({ view }: { view: 'Radsätze' | 'Lagerpl
     void moveTo(id, place);
   }
 
+  function findCardForPlace(place: string) {
+    const matches = at(place);
+    if (!matches.length) return;
+    setSelected(place);
+    setQuery('');
+    setHighlightedId(matches[0].id);
+  }
+
   function slot(place: string, label?: string) {
     const here = at(place);
     const count = here.length;
     const blocked = count > 0 && here.some(r => r.id !== dragged);
     const active = selected === place;
-    return <button key={place} type="button" draggable={count === 1 && !working} onDragStart={event => { if (count === 1) onDragStart(event, here[0]); }} onDragEnd={onDragEnd} onClick={() => setSelected(place)}
+    return <button key={place} type="button" draggable={count === 1 && !working} onDragStart={event => { if (count === 1) onDragStart(event, here[0]); }} onDragEnd={onDragEnd} onClick={() => setSelected(place)} onDoubleClick={() => findCardForPlace(place)}
       onDragOver={event => onDragOver(event, place)} onDragLeave={() => setHovered(old => old === place ? null : old)} onDrop={event => onDrop(event, place)}
-      title={`${place}: ${count ? 'Belegt — per Drag & Drop herausziehen oder Platz freigeben' : 'Frei — Radsatz hierher ziehen'}`}
+      title={`${place}: ${count ? 'Doppelklick: Radsatzkarte unten finden · Drag & Drop zum Verschieben' : 'Frei — Radsatz hierher ziehen'}`}
       style={{ width: '100%', border: hovered === place ? '3px dashed #2563eb' : active ? '3px solid #12365a' : '1px solid #cbd5e1', borderRadius: 8, padding: '8px 3px', background: count > 1 ? '#fed7aa' : count ? '#fecaca' : hovered === place ? '#bfdbfe' : '#dcfce7', color: '#172b4d', cursor: blocked ? 'not-allowed' : 'pointer', fontWeight: 700, fontSize: 12, minHeight: 42 }}>
       <span style={{ display: 'block' }}>{label ?? place}</span>
       <small>{count > 1 ? `${count} Einträge!` : count ? (here[0].kennzeichen || 'Belegt') : 'Frei'}</small>
@@ -204,8 +222,8 @@ export default function LagerUebersicht({ view }: { view: 'Radsätze' | 'Lagerpl
 
   function card(r: Schein) {
     const isPlaced = r.lagerplatz?.trim() && (norm(r.lager) === 'ZELT' ? rackPlaces : warehousePlaces).some(p => norm(p) === norm(r.lagerplatz));
-    return <article key={r.id} draggable={!working} onDragStart={e => onDragStart(e, r)} onDragEnd={onDragEnd}
-      style={{ background: '#fff', border: '1px solid #dbe3ee', borderRadius: 12, padding: 14, marginBottom: 10, cursor: working ? 'wait' : 'grab', opacity: dragged === r.id ? 0.5 : 1 }}>
+    return <article key={r.id} id={`radsatz-card-${r.id}`} draggable={!working} onDragStart={e => onDragStart(e, r)} onDragEnd={onDragEnd}
+      style={{ background: highlightedId === r.id ? '#dbeafe' : '#fff', border: highlightedId === r.id ? '3px solid #2563eb' : '1px solid #dbe3ee', boxShadow: highlightedId === r.id ? '0 0 0 5px rgba(37,99,235,0.18)' : 'none', transition: 'background-color 250ms ease, border-color 250ms ease, box-shadow 250ms ease', borderRadius: 12, padding: 14, marginBottom: 10, cursor: working ? 'wait' : 'grab', opacity: dragged === r.id ? 0.5 : 1 }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap' }}>
         <strong style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}><GripVertical size={17} color="#64748b" />{r.kennzeichen || 'Ohne Kennzeichen'}</strong>
         <span style={{ fontSize: 12, color: isPlaced ? '#991b1b' : '#92400e' }}><MapPin size={13} style={{ verticalAlign: 'middle' }} /> {isPlaced ? `${r.lager} · ${r.lagerplatz}` : 'Nicht zugeordnet'}</span>
@@ -255,7 +273,7 @@ export default function LagerUebersicht({ view }: { view: 'Radsätze' | 'Lagerpl
     <div id="lager-map" style={{ marginTop: 18 }}>
       <h2>Lagerplan</h2>
       <div style={{ display: 'flex', gap: 8, marginBottom: 14 }}>{(['Zelt', 'Lager'] as const).map(x => <button key={x} type="button" style={{ ...btn, background: lager === x ? '#12365a' : '#fff', color: lager === x ? '#fff' : '#12365a' }} onClick={() => { setLager(x); setSelected(null); }}>{x}</button>)}</div>
-      <p style={{ fontSize: 13, color: '#64748b' }}>Grün = frei · Rot = belegt · Orange = bestehende Doppelbelegung. Zum Einlagern auf Grün ziehen. Zum Freigeben einen belegten Platz auf die Ablage unten ziehen oder „Platz freigeben“ wählen.</p>
+      <p style={{ fontSize: 13, color: '#64748b' }}>Grün = frei · Rot = belegt · Orange = bestehende Doppelbelegung. Doppelklick auf einen belegten Platz findet die Karte unten. Zum Einlagern auf Grün ziehen. Zum Freigeben einen belegten Platz auf die Ablage unten ziehen oder „Platz freigeben“ wählen.</p>
       {lager === 'Zelt' ? <>
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center', marginBottom: 16 }}><input aria-label="Neue Regalnummer" placeholder="Neues Regal, z. B. 1009" value={newRegal} onChange={e => setNewRegal(e.target.value)} style={{ padding: 10, border: '1px solid #cbd5e1', borderRadius: 8 }} /><button type="button" disabled={working} style={btn} onClick={() => void addRegal()}><Plus size={15} /> Regal hinzufügen</button></div>
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))', gap: 12 }}>{regale.map(n => <div key={n} style={{ background: '#fff', border: '1px solid #dbe3ee', borderRadius: 12, padding: 12 }}><div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}><strong>Regal {n}</strong><button type="button" title={`Regal ${n} löschen`} disabled={working} onClick={() => void deleteRegal(n)} style={{ ...btn, color: '#b91c1c', padding: 5 }}><Trash2 size={16} /></button></div><div style={{ display: 'grid', gap: 8, marginTop: 12 }}>{[2, 1, 0].map(i => <div key={i}><small>{['Unten', 'Mitte', 'Oben'][i]}</small>{slot(`${n}0${i}`)}</div>)}</div></div>)}</div>
