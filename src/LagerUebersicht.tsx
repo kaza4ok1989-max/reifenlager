@@ -11,6 +11,11 @@ const searchNorm = (s: string) => s.toUpperCase().replace(/[^A-Z0-9]/g, '');
 const field = (r: Schein, key: string) => String(r.daten?.[key] ?? '').trim();
 const qrUrl = (id: string) => `${window.location.origin}${import.meta.env.BASE_URL}?qr=${encodeURIComponent(id)}`;
 const keyOf = (area: string, place: string) => `${norm(area)}::${norm(place)}`;
+// Original locations imported from Excel are stored separately from current locations.
+const oldArea = (r: Schein) => field(r, 'bereich_alt');
+const oldPlace = (r: Schein) => field(r, 'lagerplatz_alt');
+const oldRow = (r: Schein) => /^R[1-6]$/i.test(oldPlace(r)) ? oldPlace(r).toUpperCase() : '';
+
 
 export default function LagerUebersicht({ view }: { view: 'Radsätze' | 'Lagerplan' }) {
   const [rows, setRows] = useState<Schein[]>([]);
@@ -20,6 +25,9 @@ export default function LagerUebersicht({ view }: { view: 'Radsätze' | 'Lagerpl
   const [error, setError] = useState('');
   const [message, setMessage] = useState('');
   const [query, setQuery] = useState('');
+  const [excelArea, setExcelArea] = useState('all');
+  const [excelRow, setExcelRow] = useState('all');
+  const [onlyUnassigned, setOnlyUnassigned] = useState(false);
   const [lager, setLager] = useState<Area>('Zelt');
   const [selected, setSelected] = useState<string | null>(null);
   const [newRegal, setNewRegal] = useState('');
@@ -65,11 +73,23 @@ export default function LagerUebersicht({ view }: { view: 'Radsätze' | 'Lagerpl
     return map;
   }, [rows]);
   const at = (place: string, area: Area = lager) => occupied.get(keyOf(area, place)) ?? [];
+  const excelAreas = [...new Set(rows.map(oldArea).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'de', { numeric: true }));
+  const excelRows = [...new Set(rows.filter(r => excelArea === 'all' || oldArea(r) === excelArea).map(oldRow).filter(Boolean))]
+    .sort((a, b) => a.localeCompare(b, 'de', { numeric: true }));
   const filtered = rows.filter(r => {
     const values = [r.kennzeichen, r.belegnummer, r.lager, r.lagerplatz, ...Object.values(r.daten ?? {}).filter(v => typeof v === 'string')];
     const words = query.trim().split(/\s+/).filter(Boolean);
     const combined = searchNorm(values.join(' '));
-    return words.every(word => combined.includes(searchNorm(word)));
+    if (!words.every(word => combined.includes(searchNorm(word)))) return false;
+    if (excelArea !== 'all' && oldArea(r) !== excelArea) return false;
+    if (excelRow !== 'all' && oldRow(r) !== excelRow) return false;
+    if (onlyUnassigned && r.lagerplatz?.trim()) return false;
+    return true;
+  }).sort((a, b) => {
+    const areaCompare = oldArea(a).localeCompare(oldArea(b), 'de', { numeric: true });
+    if (areaCompare) return areaCompare;
+    const rowCompare = oldPlace(a).localeCompare(oldPlace(b), 'de', { numeric: true });
+    return rowCompare || (a.kennzeichen || '').localeCompare(b.kennzeichen || '', 'de', { numeric: true });
   });
   const selectedRows = selected ? at(selected) : [];
   const rackPlaces = regale.flatMap(n => [0, 1, 2].map(i => `${n}0${i}`));
@@ -199,6 +219,9 @@ export default function LagerUebersicht({ view }: { view: 'Radsätze' | 'Lagerpl
     if (!matches.length) return;
     setSelected(place);
     setQuery('');
+    setExcelArea('all');
+    setExcelRow('all');
+    setOnlyUnassigned(false);
     setHighlightedId(matches[0].id);
   }
 
@@ -228,6 +251,9 @@ export default function LagerUebersicht({ view }: { view: 'Radsätze' | 'Lagerpl
         <strong style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}><GripVertical size={17} color="#64748b" />{r.kennzeichen || 'Ohne Kennzeichen'}</strong>
         <span style={{ fontSize: 12, color: isPlaced ? '#991b1b' : '#92400e' }}><MapPin size={13} style={{ verticalAlign: 'middle' }} /> {isPlaced ? `${r.lager} · ${r.lagerplatz}` : 'Nicht zugeordnet'}</span>
       </div>
+      {(oldArea(r) || oldPlace(r)) && <p style={{ margin: '7px 0', fontSize: 12, color: '#1d4ed8', fontWeight: 700 }}>
+        Excel (alter Standort): {oldArea(r) || '—'}{oldPlace(r) ? ` · ${oldPlace(r)}` : ''}
+      </p>}
       <p style={{ margin: '8px 0', fontSize: 13 }}>Beleg: {r.belegnummer || '—'} · {field(r, 'fahrzeug') || 'Fahrzeug unbekannt'} · {field(r, 'saison') || '—'}</p>
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
         <a href={qrUrl(r.id)} style={{ ...btn, padding: '7px 9px', textDecoration: 'none', display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 12 }}><FileText size={15} /> Schein / QR</a>
@@ -287,7 +313,27 @@ export default function LagerUebersicht({ view }: { view: 'Radsätze' | 'Lagerpl
       </div>
       <h2>Radsätze — unten</h2>
       <p style={{ color: '#64748b', fontSize: 13 }}>Alle gespeicherten Radsätze ({rows.length}). Mit der Maus ziehen und auf eine grüne Zelle legen. Ein belegter Platz kann nicht überschrieben werden. Zum Herausnehmen die Karte auf „HIER ABLEGEN“ ziehen oder „Platz freigeben“ klicken.</p>
-      {!busy && (filtered.length ? <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: 10 }}>{filtered.map(card)}</div> : <p>Keine Radsätze gefunden.</p>)}
+      <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'end', background: '#fff', border: '1px solid #dbe3ee', borderRadius: 10, padding: 12, marginBottom: 12 }}>
+        <label style={{ display: 'grid', gap: 5, fontSize: 13, fontWeight: 700 }}>Bereich aus Excel
+          <select aria-label="Bereich aus Excel" value={excelArea} onChange={e => { setExcelArea(e.target.value); setExcelRow('all'); }} style={{ ...btn, minWidth: 170 }}>
+            <option value="all">Alle Bereiche</option>
+            {excelAreas.map(area => <option key={area} value={area}>{area}</option>)}
+          </select>
+        </label>
+        <label style={{ display: 'grid', gap: 5, fontSize: 13, fontWeight: 700 }}>Reihe aus Excel
+          <select aria-label="Reihe aus Excel" value={excelRow} onChange={e => setExcelRow(e.target.value)} style={{ ...btn, minWidth: 145 }}>
+            <option value="all">Alle Reihen</option>
+            {excelRows.map(reihe => <option key={reihe} value={reihe}>{reihe}</option>)}
+          </select>
+        </label>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 7, fontSize: 13, fontWeight: 700, paddingBottom: 10 }}>
+          <input type="checkbox" checked={onlyUnassigned} onChange={e => setOnlyUnassigned(e.target.checked)} /> Nur ohne neuen Lagerplatz
+        </label>
+        <button type="button" style={btn} onClick={() => { setExcelArea('all'); setExcelRow('all'); setOnlyUnassigned(false); setQuery(''); }}>Filter zurücksetzen</button>
+        <span style={{ fontSize: 13, color: '#475569', paddingBottom: 10 }}>{filtered.length} von {rows.length} Radsätzen</span>
+      </div>
+      {!rows.some(r => oldArea(r) || oldPlace(r)) && !busy && <p style={{ color: '#92400e', fontSize: 13 }}>Keine alten Excel-Lagerplätze in den gespeicherten Datensätzen gefunden. Bitte Importdaten prüfen.</p>}
+      {!busy && (filtered.length ? <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: 10 }}>{filtered.map(card)}</div> : <p>Keine Radsätze für diesen Filter gefunden.</p>)}
       {activeDrag && <p style={{ color: '#1d4ed8' }}>Verschieben: {activeDrag.kennzeichen} → {lager}</p>}
     </div>
   </section>;
