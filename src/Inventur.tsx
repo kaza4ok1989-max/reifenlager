@@ -11,6 +11,19 @@ const btn: React.CSSProperties = { background: '#12365a', color: 'white', border
 const val = (v: unknown) => v == null ? '' : String(v).trim();
 const norm = (v: unknown) => val(v).toLowerCase().normalize('NFKD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]/g, '');
 const location = (lager: string | null, platz: string | null) => lager && platz ? `${lager} · ${platz}` : 'Nicht zugeordnet';
+const errorText = (error: unknown): string => {
+  if (typeof error === 'string') return error;
+  if (error && typeof error === 'object') {
+    const e = error as Record<string, unknown>;
+    const parts = [e.message, e.details, e.hint, e.code]
+      .filter(v => typeof v === 'string' && v.trim())
+      .map(String);
+    if (parts.length) return parts.join(' | ');
+    try { return JSON.stringify(error); } catch { return 'Unbekannter Fehler'; }
+  }
+  return String(error);
+};
+
 
 export default function Inventur() {
   const [sets, setSets] = useState<SetRow[]>([]);
@@ -110,7 +123,7 @@ export default function Inventur() {
       }
       setMessage(`${r.kennzeichen || 'Radsatz'} manuell geprüft.`);
       await refresh();
-    } catch (e) { setError('Manuelle Prüfung: ' + (e instanceof Error ? e.message : String(e))); }
+    } catch (e) { setError('Manuelle Prüfung: ' + errorText(e)); }
     finally { setBusy(false); }
   }
 
@@ -123,13 +136,18 @@ export default function Inventur() {
         .select('abgeschlossen_am').eq('id', selectedRound.id).single();
       if (roundError) throw roundError;
       if (round?.abgeschlossen_am) throw new Error('Diese Inventur ist bereits abgeschlossen.');
-      const { data, error: deleteError } = await supabase.from('reifenlager_inventur')
-        .delete().eq('runde_id', selectedRound.id).eq('schein_id', r.id).select('schein_id');
+      // DELETE without a returned representation avoids an unnecessary RETURNING query.
+      const { error: deleteError } = await supabase.from('reifenlager_inventur')
+        .delete().eq('runde_id', selectedRound.id).eq('schein_id', r.id);
       if (deleteError) throw deleteError;
-      if (!data?.length) throw new Error('Keine Prüfung entfernt. Bitte DELETE-Berechtigung (RLS) in Supabase prüfen.');
-      setMessage(`Prüfung für ${r.kennzeichen || 'Radsatz'} zurückgesetzt. Radsatz und Schein bleiben erhalten.`);
+      // Confirm the record is actually gone; RLS can silently affect zero rows.
+      const { data: remaining, error: verifyError } = await supabase.from('reifenlager_inventur')
+        .select('schein_id').eq('runde_id', selectedRound.id).eq('schein_id', r.id).limit(1);
+      if (verifyError) throw verifyError;
+      if (remaining?.length) throw new Error('Prüfung wurde nicht entfernt. DELETE-Berechtigung oder Datenbankregel prüfen.');
       await refresh();
-    } catch (e) { setError('Prüfung zurücksetzen: ' + (e instanceof Error ? e.message : String(e))); }
+      setMessage(`Prüfung für ${r.kennzeichen || 'Radsatz'} zurückgesetzt. Radsatz und Schein bleiben erhalten.`);
+    } catch (e) { setError('Prüfung zurücksetzen: ' + errorText(e)); }
     finally { setBusy(false); }
   }
 
@@ -189,7 +207,7 @@ export default function Inventur() {
     </div>
     {message && <p role="status" style={{ color: '#15803d' }}>{message}</p>}
     {selectedRound && <p style={{ margin: 0, color: '#64748b' }}>Status: <strong>{selectedRound.abgeschlossen_am ? 'Abgeschlossen' : 'Aktiv'}</strong> · {selectedRound.name}</p>}
-    {error && <p role="alert" style={{ color: '#b91c1c' }}>Fehler beim Laden: {error}</p>}
+    {error && <p role="alert" style={{ color: '#b91c1c' }}>Fehler: {error}</p>}
     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(145px,1fr))', gap: 10 }}>
       {([['Radsätze gesamt', rows.length], ['Geprüft', checked], ['Nicht geprüft', rows.length - checked], ['Ohne Lagerplatz', unassigned], ['Platz abweichend', different]] as const).map(([label, count]) =>
         <div key={label} style={box}><div style={{ fontSize: 13, color: '#64748b' }}>{label}</div><strong style={{ fontSize: 27 }}>{loading ? '…' : count}</strong></div>)}
