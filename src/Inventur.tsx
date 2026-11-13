@@ -82,6 +82,57 @@ export default function Inventur() {
     finally { setBusy(false); }
   }
 
+  async function markManual(r: SetRow) {
+    if (busy || loading || !selectedRound || selectedRound.abgeschlossen_am) return;
+    if (checks.some(c => c.schein_id === r.id)) {
+      setMessage(`${r.kennzeichen || 'Radsatz'} ist in dieser Inventur bereits geprüft.`);
+      return;
+    }
+    if (!window.confirm(`Radsatz ${r.kennzeichen || r.belegnummer || r.id} wirklich vor Ort geprüft?\n\nOhne QR als geprüft markieren?`)) return;
+    setBusy(true); setError(''); setMessage('');
+    try {
+      // Recheck the selected round and existing result before writing.
+      const { data: round, error: roundError } = await supabase.from('reifenlager_inventur_runden')
+        .select('abgeschlossen_am').eq('id', selectedRound.id).single();
+      if (roundError) throw roundError;
+      if (round?.abgeschlossen_am) throw new Error('Diese Inventur ist bereits abgeschlossen.');
+      const { data: existing, error: checkError } = await supabase.from('reifenlager_inventur')
+        .select('schein_id').eq('runde_id', selectedRound.id).eq('schein_id', r.id).limit(1);
+      if (checkError) throw checkError;
+      if (existing?.length) { setMessage('Bereits geprüft — keine zweite Prüfung gespeichert.'); await refresh(); return; }
+      const { error: insertError } = await supabase.from('reifenlager_inventur').insert({
+        runde_id: selectedRound.id, schein_id: r.id, kennzeichen: r.kennzeichen,
+        lager: r.lager, lagerplatz: r.lagerplatz, geprueft_am: new Date().toISOString()
+      });
+      if (insertError) {
+        if (insertError.code === '23505') { setMessage('Bereits geprüft — keine zweite Prüfung gespeichert.'); await refresh(); return; }
+        throw insertError;
+      }
+      setMessage(`${r.kennzeichen || 'Radsatz'} manuell geprüft.`);
+      await refresh();
+    } catch (e) { setError('Manuelle Prüfung: ' + (e instanceof Error ? e.message : String(e))); }
+    finally { setBusy(false); }
+  }
+
+  async function resetCheck(r: SetRow) {
+    if (busy || loading || !selectedRound || selectedRound.abgeschlossen_am) return;
+    if (!window.confirm(`Prüfung für ${r.kennzeichen || r.belegnummer || r.id} wirklich zurücksetzen?\n\nDer Radsatz und sein Einlagerungsschein bleiben erhalten.`)) return;
+    setBusy(true); setError(''); setMessage('');
+    try {
+      const { data: round, error: roundError } = await supabase.from('reifenlager_inventur_runden')
+        .select('abgeschlossen_am').eq('id', selectedRound.id).single();
+      if (roundError) throw roundError;
+      if (round?.abgeschlossen_am) throw new Error('Diese Inventur ist bereits abgeschlossen.');
+      const { data, error: deleteError } = await supabase.from('reifenlager_inventur')
+        .delete().eq('runde_id', selectedRound.id).eq('schein_id', r.id).select('schein_id');
+      if (deleteError) throw deleteError;
+      if (!data?.length) throw new Error('Keine Prüfung entfernt. Bitte DELETE-Berechtigung (RLS) in Supabase prüfen.');
+      setMessage(`Prüfung für ${r.kennzeichen || 'Radsatz'} zurückgesetzt. Radsatz und Schein bleiben erhalten.`);
+      await refresh();
+    } catch (e) { setError('Prüfung zurücksetzen: ' + (e instanceof Error ? e.message : String(e))); }
+    finally { setBusy(false); }
+  }
+
   const latest = useMemo(() => {
     const map = new Map<string, CheckRow>();
     for (const c of checks) if (!map.has(c.schein_id)) map.set(c.schein_id, c);
@@ -177,7 +228,12 @@ export default function Inventur() {
               {r.different ? `Platz abweichend · Prüfung: ${location(r.check?.lager || null, r.check?.lagerplatz || null)} · ${new Date(r.check!.geprueft_am).toLocaleString('de-DE')}` : r.check ? `Gescannt: ${new Date(r.check.geprueft_am).toLocaleString('de-DE')}` : 'In dieser Inventur noch nicht gescannt'}
             </div>
           </div>
-          <button type="button" style={btn} onClick={() => openQr(r.id)}><ClipboardCheck size={15} style={{ verticalAlign: 'middle' }} /> QR / Details</button>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            {!selectedRound?.abgeschlossen_am && selectedRound && (r.check
+              ? <button type="button" disabled={busy || loading} onClick={() => void resetCheck(r)} style={{ ...btn, background: '#fff', color: '#9a3412', border: '1px solid #fdba74', opacity: busy ? 0.6 : 1 }}>Prüfung zurücksetzen</button>
+              : <button type="button" disabled={busy || loading} onClick={() => void markManual(r)} style={{ ...btn, background: '#166534', opacity: busy ? 0.6 : 1 }}>Manuell geprüft</button>)}
+            <button type="button" style={btn} onClick={() => openQr(r.id)}><ClipboardCheck size={15} style={{ verticalAlign: 'middle' }} /> QR / Details</button>
+          </div>
         </div>)}
     </div>
   </section>;
