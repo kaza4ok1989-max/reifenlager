@@ -45,13 +45,13 @@ export default function LagerUebersicht({ view }: { view: 'Radsätze' | 'Lagerpl
     const [scheine, shelves, custom] = await Promise.all([
       supabase.from('reifenlager_scheine').select('id,belegnummer,kennzeichen,lager,lagerplatz,daten,erstellt_am').order('erstellt_am', { ascending: false }),
       supabase.from('reifenlager_regale').select('nummer').order('nummer'),
-      supabase.from('reifenlager_einzelplaetze').select('name').order('name'),
+      supabase.from('reifenlager_einzelplaetze').select('bezeichnung').order('bezeichnung'),
     ]);
     const problems = [scheine.error && `Radsätze: ${scheine.error.message}`, shelves.error && `Regale: ${shelves.error.message}`, custom.error && `Einzelplätze: ${custom.error.message}`].filter(Boolean);
     if (problems.length) setError(problems.join(' | '));
     if (!scheine.error) setRows((scheine.data ?? []) as Schein[]);
     if (!shelves.error) setRegale((shelves.data ?? []).map(r => String(r.nummer)));
-    if (!custom.error) setCustomPlaces((custom.data ?? []).map(r => String(r.name)));
+    if (!custom.error) setCustomPlaces((custom.data ?? []).map(r => String(r.bezeichnung)));
     setBusy(false);
   }
   useEffect(() => { void refresh(); }, []);
@@ -113,9 +113,9 @@ export default function LagerUebersicht({ view }: { view: 'Radsätze' | 'Lagerpl
       setError('Ein Lagerplatz mit diesem Namen ist bereits vorhanden.'); return;
     }
     setWorking(true); setError(''); setMessage('');
-    const table = /^\d{4}$/.test(name) ? 'reifenlager_regale' : 'reifenlager_einzelplaetze';
-    const values = table === 'reifenlager_regale' ? { nummer: name } : { name };
-    const { error: e } = await supabase.from(table).insert(values);
+    const { error: e } = /^\d{4}$/.test(name)
+      ? await supabase.from('reifenlager_regale').insert({ nummer: name })
+      : await supabase.from('reifenlager_einzelplaetze').insert({ bezeichnung: name });
     if (e) setError('Regal hinzufügen: ' + e.message);
     else { setNewRegal(''); setMessage(`Regal ${name} mit 3 Ebenen hinzugefügt.`); await refresh(); }
     setWorking(false);
@@ -126,7 +126,7 @@ export default function LagerUebersicht({ view }: { view: 'Radsätze' | 'Lagerpl
     if (places.some(p => at(p, 'Zelt').length > 0)) { setError(`Regal ${name} ist belegt. Zuerst die Radsätze verschieben.`); return; }
     if (!window.confirm(`Regal ${name} wirklich löschen?`)) return;
     setWorking(true); setError(''); setMessage('');
-    const { error: e } = await supabase.from('reifenlager_einzelplaetze').delete().eq('name', name);
+    const { error: e } = await supabase.from('reifenlager_einzelplaetze').delete().eq('bezeichnung', name);
     if (e) setError('Regal löschen: ' + e.message);
     else { setSelected(null); setMessage(`Regal ${name} gelöscht.`); await refresh(); }
     setWorking(false);
