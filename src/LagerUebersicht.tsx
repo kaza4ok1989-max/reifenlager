@@ -14,7 +14,7 @@ const keyOf = (area: string, place: string) => `${norm(area)}::${norm(place)}`;
 // Original locations imported from Excel are stored separately from current locations.
 const oldArea = (r: Schein) => field(r, 'bereich_alt');
 const oldPlace = (r: Schein) => field(r, 'lagerplatz_alt');
-const oldRow = (r: Schein) => /^R[1-6]$/i.test(oldPlace(r)) ? oldPlace(r).toUpperCase() : '';
+const oldLocation = (r: Schein) => oldPlace(r).toUpperCase();
 
 
 export default function LagerUebersicht({ view }: { view: 'Radsätze' | 'Lagerplan' }) {
@@ -74,7 +74,7 @@ export default function LagerUebersicht({ view }: { view: 'Radsätze' | 'Lagerpl
   }, [rows]);
   const at = (place: string, area: Area = lager) => occupied.get(keyOf(area, place)) ?? [];
   const excelAreas = [...new Set(rows.map(oldArea).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'de', { numeric: true }));
-  const excelRows = [...new Set(rows.filter(r => excelArea === 'all' || oldArea(r) === excelArea).map(oldRow).filter(Boolean))]
+  const excelLocations = [...new Set(rows.filter(r => excelArea === 'all' || oldArea(r) === excelArea).map(oldLocation).filter(Boolean))]
     .sort((a, b) => a.localeCompare(b, 'de', { numeric: true }));
   const filtered = rows.filter(r => {
     const values = [r.kennzeichen, r.belegnummer, r.lager, r.lagerplatz, ...Object.values(r.daten ?? {}).filter(v => typeof v === 'string')];
@@ -82,7 +82,7 @@ export default function LagerUebersicht({ view }: { view: 'Radsätze' | 'Lagerpl
     const combined = searchNorm(values.join(' '));
     if (!words.every(word => combined.includes(searchNorm(word)))) return false;
     if (excelArea !== 'all' && oldArea(r) !== excelArea) return false;
-    if (excelRow !== 'all' && oldRow(r) !== excelRow) return false;
+    if (excelRow !== 'all' && oldLocation(r) !== excelRow) return false;
     if (onlyUnassigned && r.lagerplatz?.trim()) return false;
     return true;
   }).sort((a, b) => {
@@ -320,10 +320,10 @@ export default function LagerUebersicht({ view }: { view: 'Radsätze' | 'Lagerpl
             {excelAreas.map(area => <option key={area} value={area}>{area}</option>)}
           </select>
         </label>
-        <label style={{ display: 'grid', gap: 5, fontSize: 13, fontWeight: 700 }}>Reihe aus Excel
-          <select aria-label="Reihe aus Excel" value={excelRow} onChange={e => setExcelRow(e.target.value)} style={{ ...btn, minWidth: 145 }}>
-            <option value="all">Alle Reihen</option>
-            {excelRows.map(reihe => <option key={reihe} value={reihe}>{reihe}</option>)}
+        <label style={{ display: 'grid', gap: 5, fontSize: 13, fontWeight: 700 }}>Alter Lagerplatz (Excel)
+          <select aria-label="Alter Lagerplatz (Excel)" value={excelRow} onChange={e => setExcelRow(e.target.value)} style={{ ...btn, minWidth: 145 }}>
+            <option value="all">Alle alten Plätze</option>
+            {excelLocations.map(platz => <option key={platz} value={platz}>{platz}</option>)}
           </select>
         </label>
         <label style={{ display: 'flex', alignItems: 'center', gap: 7, fontSize: 13, fontWeight: 700, paddingBottom: 10 }}>
