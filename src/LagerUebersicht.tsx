@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { CSSProperties, DragEvent } from 'react';
 import { supabase } from './supabase';
-import { RefreshCw, Search, MapPin, FileText, Plus, Trash2, GripVertical, Printer } from 'lucide-react';
+import { RefreshCw, Search, MapPin, FileText, Plus, Trash2, GripVertical, Printer, ClipboardPlus } from 'lucide-react';
 
 type Schein = { id: string; belegnummer: string | null; kennzeichen: string; lager: string; lagerplatz: string; daten: Record<string, unknown> | null; erstellt_am: string };
 type Area = 'Zelt' | 'Lager';
@@ -32,8 +32,15 @@ export default function LagerUebersicht({ view }: { view: 'Radsätze' | 'Lagerpl
   const [lager, setLager] = useState<Area>('Zelt');
   const [selected, setSelected] = useState<string | null>(null);
   const [newRegal, setNewRegal] = useState('');
+  const [printArea, setPrintArea] = useState<Area>('Zelt');
   const [printGroup, setPrintGroup] = useState('all');
   const [printFree, setPrintFree] = useState(true);
+  const [quickOpen, setQuickOpen] = useState(false);
+  const [quickPlate, setQuickPlate] = useState('');
+  const [quickArea, setQuickArea] = useState<Area>('Zelt');
+  const [quickPlace, setQuickPlace] = useState('');
+  const [quickNote, setQuickNote] = useState('');
+  const [quickCreatedId, setQuickCreatedId] = useState<string | null>(null);
   const [dragged, setDragged] = useState<string | null>(null);
   const [hovered, setHovered] = useState<string | null>(null);
   const [releaseHover, setReleaseHover] = useState(false);
@@ -102,58 +109,99 @@ export default function LagerUebersicht({ view }: { view: 'Radsätze' | 'Lagerpl
   const legacyCustomPlaces = customPlaces.filter(name => at(name, 'Zelt').length > 0);
   const rackPlaces = [...regale.flatMap(n => [0, 1, 2].map(i => `${n}0${i}`)), ...customPlaces.flatMap(customLevels), ...legacyCustomPlaces];
   const warehousePlaces = Array.from({ length: 6 }, (_, r) => Array.from({ length: 6 }, (_, s) => [`R${r + 1}-${s + 1}-Unten`, `R${r + 1}-${s + 1}-Oben`])).flat(2);
-  // Print the current, actual positions (not the historical Excel locations).
-  const printGroups = lager === 'Zelt'
-    ? [...regale.map(name => ({ value: `standard:${name}`, label: `Regal ${name}` })),
-       ...customPlaces.map(name => ({ value: `custom:${name}`, label: `Regal ${name}` }))]
-    : [1, 2, 3, 4, 5, 6].map(number => ({ value: `row:${number}`, label: `Reihe ${number}` }));
+  const printGroups = printArea === 'Zelt'
+    ? [...regale.map(name => ({ value: `standard:${name}`, label: `Regal ${name}` })), ...customPlaces.map(name => ({ value: `custom:${name}`, label: `Regal ${name}` }))]
+    : Array.from({ length: 6 }, (_, i) => ({ value: `row:${i + 1}`, label: `Reihe ${i + 1}` }));
 
-  function printStorageList() {
-    type PrintSlot = { place: string; level: string; group: string };
-    const slots: PrintSlot[] = [];
-    if (lager === 'Zelt') {
+  function printList() {
+    const validGroup = printGroups.some(g => g.value === printGroup) ? printGroup : 'all';
+    const positions: { place: string; level: string; group: string }[] = [];
+    if (printArea === 'Zelt') {
       for (const name of regale) {
-        if (printGroup !== 'all' && printGroup !== `standard:${name}`) continue;
+        if (validGroup !== 'all' && validGroup !== `standard:${name}`) continue;
         for (const [index, level] of ['Oben', 'Mitte', 'Unten'].entries()) {
-          slots.push({ place: `${name}0${2 - index}`, level, group: `Regal ${name}` });
+          positions.push({ place: `${name}0${2 - index}`, level, group: `Regal ${name}` });
         }
       }
       for (const name of customPlaces) {
-        if (printGroup !== 'all' && printGroup !== `custom:${name}`) continue;
+        if (validGroup !== 'all' && validGroup !== `custom:${name}`) continue;
         for (const [index, level] of ['Oben', 'Mitte', 'Unten'].entries()) {
-          slots.push({ place: customLevels(name)[2 - index], level, group: `Regal ${name}` });
+          positions.push({ place: `${name}-${['O', 'M', 'U'][index]}`, level, group: `Regal ${name}` });
         }
-        if (legacyCustomPlaces.includes(name)) slots.push({ place: name, level: 'Alter Einzelplatz', group: `Regal ${name}` });
+        if (legacyCustomPlaces.includes(name)) positions.push({ place: name, level: 'Alter Einzelplatz', group: `Regal ${name}` });
       }
     } else {
-      for (let number = 1; number <= 6; number++) {
-        if (printGroup !== 'all' && printGroup !== `row:${number}`) continue;
+      for (let row = 1; row <= 6; row++) {
+        if (validGroup !== 'all' && validGroup !== `row:${row}`) continue;
         for (let stack = 1; stack <= 6; stack++) {
           for (const level of ['Oben', 'Unten']) {
-            slots.push({ place: `R${number}-${stack}-${level}`, level: `Stapel ${stack} · ${level}`, group: `Reihe ${number}` });
+            positions.push({ place: `R${row}-${stack}-${level}`, level, group: `Reihe ${row} / Stapel ${stack}` });
           }
         }
       }
     }
-    const entries = slots.flatMap(slotInfo => {
-      const matches = at(slotInfo.place, lager);
-      if (!matches.length) return printFree ? [{ ...slotInfo, plate: 'Frei', receipt: '' }] : [];
-      return matches.map(r => ({ ...slotInfo, plate: r.kennzeichen || 'Ohne Kennzeichen', receipt: r.belegnummer || '' }));
+    const printable = positions.flatMap(position => {
+      const sets = at(position.place, printArea);
+      if (!sets.length) return printFree ? [{ ...position, plate: 'Frei', receipt: '' }] : [];
+      return sets.map(set => ({ ...position, plate: set.kennzeichen || 'Ohne Kennzeichen', receipt: set.belegnummer || '' }));
     });
-    const escapeHtml = (value: string) => value.replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char] || char);
-    const title = printGroup === 'all' ? `Alle ${lager === 'Zelt' ? 'Regale' : 'Reihen'}` : printGroups.find(g => g.value === printGroup)?.label || 'Lagerliste';
+    const esc = (value: string) => value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    const groupLabel = printGroups.find(g => g.value === validGroup)?.label ?? (printArea === 'Zelt' ? 'Alle Regale' : 'Alle Reihen');
+    const now = new Date().toLocaleString('de-DE');
+    const tableRows = printable.map(item => `<tr><td>${esc(item.group)}</td><td>${esc(item.level)}</td><td>${esc(item.place)}</td><td>${esc(item.plate)}</td><td>${esc(item.receipt)}</td><td class="check">&#9633;</td></tr>`).join('');
     const popup = window.open('', '_blank');
     if (!popup) { setError('Druckfenster wurde blockiert. Bitte Pop-ups für BESICO erlauben.'); return; }
-    const bodyRows = entries.map(entry => `<tr><td>${escapeHtml(entry.group)}</td><td>${escapeHtml(entry.level)}</td><td>${escapeHtml(entry.place)}</td><td>${escapeHtml(entry.plate)}</td><td>${escapeHtml(entry.receipt)}</td><td class="check">□</td></tr>`).join('');
     popup.document.open();
-    popup.document.write(`<!doctype html><html lang="de"><head><meta charset="utf-8"><title>BESICO Lagerliste – ${escapeHtml(title)}</title><style>
-      @page{size:A4 portrait;margin:13mm}body{font-family:Arial,sans-serif;color:#172b4d;margin:0;font-size:11px}h1{font-size:21px;margin:0 0 6px}p{margin:4px 0 14px;color:#475569}table{width:100%;border-collapse:collapse}th,td{border:1px solid #b7c4d2;padding:7px 5px;text-align:left;overflow-wrap:anywhere}th{background:#e9f2fb}tr{break-inside:avoid}.check{text-align:center;font-size:19px;width:30px}header{border-bottom:2px solid #12365a;margin-bottom:14px;padding-bottom:8px}.toolbar{margin-bottom:15px}@media print{.toolbar{display:none}thead{display:table-header-group}}button{padding:9px 14px;cursor:pointer}
-    </style></head><body><div class="toolbar"><button onclick="window.print()">Liste drucken</button></div><header><h1>BESICO REIFENLAGER</h1><div>LAGERLISTE · ${escapeHtml(lager)} · ${escapeHtml(title)}</div></header><p>Datum: ${escapeHtml(new Date().toLocaleString('de-DE'))} · ${entries.length} Einträge · ${printFree ? 'inkl. freie Plätze' : 'nur belegte Plätze'}</p><table><thead><tr><th>Bereich</th><th>Ebene</th><th>Lagerplatz</th><th>Kennzeichen</th><th>Beleg</th><th>Kontrolle</th></tr></thead><tbody>${bodyRows || '<tr><td colspan="6">Keine belegten Plätze vorhanden.</td></tr>'}</tbody></table></body></html>`);
+    popup.document.write(`<!doctype html><html lang="de"><head><meta charset="utf-8"><title>BESICO Lagerliste - ${esc(printArea)} - ${esc(groupLabel)}</title><style>
+      body{font:12px Arial,sans-serif;color:#182b44;margin:24px}h1{font-size:20px;margin:0 0 5px}h2{font-size:15px;margin:0 0 15px}.meta{color:#555;margin-bottom:18px}table{width:100%;border-collapse:collapse}th,td{border:1px solid #9aa8b9;padding:7px;text-align:left}th{background:#eaf0f7}.check{text-align:center;font-size:19px;width:55px}tr{break-inside:avoid}thead{display:table-header-group}.actions{margin-bottom:20px}button{padding:9px 15px;cursor:pointer}@media print{.actions{display:none}body{margin:0}@page{size:A4;margin:12mm}}
+    </style></head><body><div class="actions"><button onclick="window.print()">Drucken</button></div><h1>BESICO REIFENLAGER</h1><h2>Lagerliste · ${esc(printArea)} · ${esc(groupLabel)}</h2><div class="meta">Erstellt: ${esc(now)} · ${printable.length} Zeilen · ${printFree ? 'inkl. freier Plätze' : 'nur belegte Plätze'}</div><table><thead><tr><th>Regal / Reihe</th><th>Ebene</th><th>Lagerplatz</th><th>Kennzeichen</th><th>Beleg</th><th>Kontrolle</th></tr></thead><tbody>${tableRows || '<tr><td colspan="6">Keine belegten Lagerplätze gefunden.</td></tr>'}</tbody></table></body></html>`);
     popup.document.close();
     popup.focus();
   }
   const currentId = dragged;
   const activeDrag = rows.find(r => r.id === currentId);
+
+  async function quickAdd() {
+    const plate = quickPlate.trim().replace(/\s+/g, ' ').toUpperCase();
+    if (!plate || plate.length > 32) { setError('Kennzeichen: bitte 1–32 Zeichen eingeben.'); return; }
+    if (!quickPlace) { setError('Bitte einen freien Lagerplatz auswählen.'); return; }
+    if (working || busy) return;
+    setWorking(true); setError(''); setMessage(''); setQuickCreatedId(null);
+    try {
+      // Recheck against the database immediately before inserting; stale UI must not decide availability.
+      const { data: latest, error: readError } = await supabase.from('reifenlager_scheine')
+        .select('id,kennzeichen,lager,lagerplatz');
+      if (readError) throw readError;
+      const existing = latest ?? [];
+      const samePlate = existing.filter(r => searchNorm(String(r.kennzeichen ?? '')) === searchNorm(plate));
+      if (samePlate.length && !window.confirm(`Kennzeichen ${plate} ist bereits ${samePlate.length}× gespeichert. Trotzdem einen weiteren Radsatz anlegen?`)) return;
+      if (existing.some(r => keyOf(String(r.lager ?? ''), String(r.lagerplatz ?? '')) === keyOf(quickArea, quickPlace))) {
+        throw new Error('Lagerplatz ist inzwischen belegt. Bitte aktualisieren und anderen Platz wählen.');
+      }
+      if (!(quickArea === 'Zelt' ? rackPlaces : warehousePlaces).includes(quickPlace)) {
+        throw new Error('Ungültiger Lagerplatz.');
+      }
+      const receipt = `SCHNELL-${crypto.randomUUID().slice(0, 12).toUpperCase()}`;
+      const payload = {
+        kennzeichen: plate, belegnummer: receipt, lager: quickArea, lagerplatz: quickPlace,
+        daten: {
+          belegnummer: receipt, kennzeichen: plate, lager: quickArea, lagerplatz: quickPlace,
+          bemerkung: quickNote.trim(), schnellaufnahme: true, status: 'Unvollständig',
+          datum: new Date().toISOString().slice(0, 10)
+        }
+      };
+      const { data: created, error: insertError } = await supabase.from('reifenlager_scheine')
+        .insert(payload).select('id').single();
+      if (insertError || !created) throw insertError ?? new Error('Speichern fehlgeschlagen.');
+      setQuickCreatedId(created.id);
+      setMessage(`${plate} → ${quickArea} / ${quickPlace} als Schnellaufnahme gespeichert.`);
+      setQuickPlate(''); setQuickNote(''); setQuickPlace('');
+      setLager(quickArea); setSelected(payload.lagerplatz);
+      await refresh();
+    } catch (e) {
+      setError('Schnellaufnahme: ' + (e instanceof Error ? e.message : String(e)));
+    } finally { setWorking(false); }
+  }
 
   async function addRegal() {
     const name = newRegal.trim().replace(/\s+/g, ' ');
@@ -327,6 +375,7 @@ export default function LagerUebersicht({ view }: { view: 'Radsätze' | 'Lagerpl
   const assignRow = rows.find(r => r.id === assignId);
   const assignPlaces = assignArea === 'Zelt' ? rackPlaces : warehousePlaces;
   const freeAssignPlaces = assignPlaces.filter(p => !at(p, assignArea).some(r => r.id !== assignId));
+  const quickFreePlaces = (quickArea === 'Zelt' ? rackPlaces : warehousePlaces).filter(p => at(p, quickArea).length === 0);
 
   function card(r: Schein) {
     const isPlaced = r.lagerplatz?.trim() && (norm(r.lager) === 'ZELT' ? rackPlaces : warehousePlaces).some(p => norm(p) === norm(r.lagerplatz));
@@ -339,6 +388,7 @@ export default function LagerUebersicht({ view }: { view: 'Radsätze' | 'Lagerpl
       {(oldArea(r) || oldPlace(r)) && <p style={{ margin: '7px 0', fontSize: 12, color: '#1d4ed8', fontWeight: 700 }}>
         Excel (alter Standort): {oldArea(r) || '—'}{oldPlace(r) ? ` · ${oldPlace(r)}` : ''}
       </p>}
+      {r.daten?.schnellaufnahme === true && <p style={{ color: '#92400e', fontWeight: 700, fontSize: 12, margin: '6px 0' }}>Schnellaufnahme · Unvollständig</p>}
       <p style={{ margin: '8px 0', fontSize: 13 }}>Beleg: {r.belegnummer || '—'} · {field(r, 'fahrzeug') || 'Fahrzeug unbekannt'} · {field(r, 'saison') || '—'}</p>
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
         <a href={qrUrl(r.id)} style={{ ...btn, padding: '7px 9px', textDecoration: 'none', display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 12 }}><FileText size={15} /> Schein / QR</a>
@@ -381,21 +431,57 @@ export default function LagerUebersicht({ view }: { view: 'Radsätze' | 'Lagerpl
       </div>
       {!freeAssignPlaces.length && <p style={{ color: '#b91c1c' }}>Keine freien Lagerplätze in diesem Bereich.</p>}
     </div>}
-    <div id="lager-map" style={{ marginTop: 18 }}>
-      <h2>Lagerplan</h2>
-      <div style={{ display: 'flex', gap: 8, marginBottom: 14 }}>{(['Zelt', 'Lager'] as const).map(x => <button key={x} type="button" style={{ ...btn, background: lager === x ? '#12365a' : '#fff', color: lager === x ? '#fff' : '#12365a' }} onClick={() => { setLager(x); setSelected(null); setPrintGroup('all'); }}>{x}</button>)}</div>
-      <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'end', padding: 12, marginBottom: 14, background: '#fff', border: '1px solid #dbe3ee', borderRadius: 10 }}>
-        <label style={{ display: 'grid', gap: 5, fontSize: 13, fontWeight: 700 }}>Lagerliste drucken
-          <select aria-label="Bereich für Lagerliste" value={printGroup} onChange={e => setPrintGroup(e.target.value)} style={{ ...btn, minWidth: 190 }}>
-            <option value="all">{lager === 'Zelt' ? 'Alle Regale' : 'Alle Reihen'}</option>
+    <div style={{ background: '#fff', border: '1px solid #dbe3ee', borderRadius: 12, padding: 16, marginTop: 16, marginBottom: 16 }}>
+      <button type="button" style={{ ...btn, background: quickOpen ? '#e2e8f0' : '#12365a', color: quickOpen ? '#12365a' : '#fff', display: 'inline-flex', alignItems: 'center', gap: 7 }} onClick={() => setQuickOpen(v => !v)}><ClipboardPlus size={18} /> + Schnellaufnahme</button>
+      {quickOpen && <div style={{ marginTop: 14 }}>
+        <h2 style={{ margin: '0 0 8px' }}>Radsatz schnell erfassen</h2>
+        <p style={{ fontSize: 13, color: '#64748b' }}>Für gefundene Radsätze ohne vollständigen Einlagerungsschein. Erst Kennzeichen prüfen, dann freien Platz wählen.</p>
+        <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'end' }}>
+          <label style={{ display: 'grid', gap: 5, fontWeight: 700, fontSize: 13 }}>Kennzeichen *
+            <input value={quickPlate} maxLength={32} onChange={e => { setQuickPlate(e.target.value); setQuickCreatedId(null); }} placeholder="z. B. Z-BS 949E" style={{ padding: 10, borderRadius: 8, border: '1px solid #cbd5e1' }} />
+          </label>
+          <label style={{ display: 'grid', gap: 5, fontWeight: 700, fontSize: 13 }}>Bereich
+            <select value={quickArea} onChange={e => { setQuickArea(e.target.value as Area); setQuickPlace(''); }} style={{ ...btn, minWidth: 120 }}><option value="Zelt">Zelt</option><option value="Lager">Lager</option></select>
+          </label>
+          <label style={{ display: 'grid', gap: 5, fontWeight: 700, fontSize: 13 }}>Freier Lagerplatz *
+            <select value={quickPlace} onChange={e => setQuickPlace(e.target.value)} style={{ ...btn, minWidth: 180 }}>
+              <option value="">Bitte auswählen</option>
+              {quickFreePlaces.map(p => <option key={p} value={p}>{p}</option>)}
+            </select>
+          </label>
+          <label style={{ display: 'grid', gap: 5, fontWeight: 700, fontSize: 13 }}>Bemerkung (optional)
+            <input value={quickNote} maxLength={500} onChange={e => setQuickNote(e.target.value)} placeholder="z. B. 4 Winterräder" style={{ padding: 10, borderRadius: 8, border: '1px solid #cbd5e1', minWidth: 200 }} />
+          </label>
+          <button type="button" disabled={working || busy || !quickPlate.trim() || !quickPlace} onClick={() => void quickAdd()} style={{ ...btn, background: '#166534', color: '#fff' }}>Speichern</button>
+        </div>
+        {quickCreatedId && <p style={{ color: '#166534', fontWeight: 700 }}>Gespeichert! <a href={qrUrl(quickCreatedId)}>Schein / QR öffnen</a></p>}
+        <p style={{ fontSize: 12, color: '#64748b' }}>Der Eintrag erhält eine SCHNELL-Belegnummer und die Markierung „Unvollständig“. Das ist noch kein ausgefüllter Kundeneinlagerungsschein.</p>
+      </div>}
+    </div>
+    <div style={{ background: '#fff', border: '1px solid #dbe3ee', borderRadius: 12, padding: 16, marginTop: 16, marginBottom: 16 }}>
+      <h2 style={{ margin: '0 0 12px', display: 'flex', alignItems: 'center', gap: 8 }}><Printer size={20} /> Lagerliste drucken</h2>
+      <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'end', gap: 12 }}>
+        <label style={{ display: 'grid', gap: 5, fontSize: 13, fontWeight: 700 }}>Bereich
+          <select value={printArea} onChange={e => { setPrintArea(e.target.value as Area); setPrintGroup('all'); }} style={{ ...btn, minWidth: 130 }}>
+            <option value="Zelt">Zelt</option><option value="Lager">Lager</option>
+          </select>
+        </label>
+        <label style={{ display: 'grid', gap: 5, fontSize: 13, fontWeight: 700 }}>{printArea === 'Zelt' ? 'Regal' : 'Reihe'}
+          <select value={printGroup} onChange={e => setPrintGroup(e.target.value)} style={{ ...btn, minWidth: 175 }}>
+            <option value="all">{printArea === 'Zelt' ? 'Alle Regale' : 'Alle Reihen'}</option>
             {printGroups.map(group => <option key={group.value} value={group.value}>{group.label}</option>)}
           </select>
         </label>
-        <label style={{ display: 'flex', alignItems: 'center', gap: 7, fontSize: 13, paddingBottom: 10 }}>
+        <label style={{ display: 'flex', gap: 7, alignItems: 'center', fontSize: 13, fontWeight: 700, paddingBottom: 10 }}>
           <input type="checkbox" checked={printFree} onChange={e => setPrintFree(e.target.checked)} /> Freie Plätze mitdrucken
         </label>
-        <button type="button" style={{ ...btn, background: '#12365a', color: '#fff', display: 'inline-flex', gap: 7, alignItems: 'center' }} disabled={busy} onClick={printStorageList}><Printer size={16} /> Liste drucken</button>
+        <button type="button" style={{ ...btn, background: '#12365a', color: '#fff', display: 'inline-flex', gap: 7, alignItems: 'center' }} disabled={busy} onClick={printList}><Printer size={16} /> Liste drucken</button>
       </div>
+      <p style={{ fontSize: 12, color: '#64748b', marginBottom: 0 }}>Druckt die aktuellen Lagerplätze aus BESICO. Keine Änderungen an Radsätzen oder Inventur.</p>
+    </div>
+    <div id="lager-map" style={{ marginTop: 18 }}>
+      <h2>Lagerplan</h2>
+      <div style={{ display: 'flex', gap: 8, marginBottom: 14 }}>{(['Zelt', 'Lager'] as const).map(x => <button key={x} type="button" style={{ ...btn, background: lager === x ? '#12365a' : '#fff', color: lager === x ? '#fff' : '#12365a' }} onClick={() => { setLager(x); setSelected(null); }}>{x}</button>)}</div>
       <p style={{ fontSize: 13, color: '#64748b' }}>Grün = frei · Rot = belegt · Orange = bestehende Doppelbelegung. Doppelklick auf einen belegten Platz findet die Karte unten. Zum Einlagern auf Grün ziehen. Zum Freigeben einen belegten Platz auf die Ablage unten ziehen oder „Platz freigeben“ wählen.</p>
       {lager === 'Zelt' ? <>
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center', marginBottom: 16 }}>
