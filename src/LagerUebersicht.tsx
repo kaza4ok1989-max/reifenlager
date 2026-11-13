@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { CSSProperties, DragEvent } from 'react';
 import { supabase } from './supabase';
-import { RefreshCw, Search, MapPin, FileText, Plus, Trash2, GripVertical } from 'lucide-react';
+import { RefreshCw, Search, MapPin, FileText, Plus, Trash2, GripVertical, Printer } from 'lucide-react';
 
 type Schein = { id: string; belegnummer: string | null; kennzeichen: string; lager: string; lagerplatz: string; daten: Record<string, unknown> | null; erstellt_am: string };
 type Area = 'Zelt' | 'Lager';
@@ -32,6 +32,8 @@ export default function LagerUebersicht({ view }: { view: 'Radsätze' | 'Lagerpl
   const [lager, setLager] = useState<Area>('Zelt');
   const [selected, setSelected] = useState<string | null>(null);
   const [newRegal, setNewRegal] = useState('');
+  const [printGroup, setPrintGroup] = useState('all');
+  const [printFree, setPrintFree] = useState(true);
   const [dragged, setDragged] = useState<string | null>(null);
   const [hovered, setHovered] = useState<string | null>(null);
   const [releaseHover, setReleaseHover] = useState(false);
@@ -100,6 +102,56 @@ export default function LagerUebersicht({ view }: { view: 'Radsätze' | 'Lagerpl
   const legacyCustomPlaces = customPlaces.filter(name => at(name, 'Zelt').length > 0);
   const rackPlaces = [...regale.flatMap(n => [0, 1, 2].map(i => `${n}0${i}`)), ...customPlaces.flatMap(customLevels), ...legacyCustomPlaces];
   const warehousePlaces = Array.from({ length: 6 }, (_, r) => Array.from({ length: 6 }, (_, s) => [`R${r + 1}-${s + 1}-Unten`, `R${r + 1}-${s + 1}-Oben`])).flat(2);
+  // Print the current, actual positions (not the historical Excel locations).
+  const printGroups = lager === 'Zelt'
+    ? [...regale.map(name => ({ value: `standard:${name}`, label: `Regal ${name}` })),
+       ...customPlaces.map(name => ({ value: `custom:${name}`, label: `Regal ${name}` }))]
+    : [1, 2, 3, 4, 5, 6].map(number => ({ value: `row:${number}`, label: `Reihe ${number}` }));
+
+  function printStorageList() {
+    type PrintSlot = { place: string; level: string; group: string };
+    const slots: PrintSlot[] = [];
+    if (lager === 'Zelt') {
+      for (const name of regale) {
+        if (printGroup !== 'all' && printGroup !== `standard:${name}`) continue;
+        for (const [index, level] of ['Oben', 'Mitte', 'Unten'].entries()) {
+          slots.push({ place: `${name}0${2 - index}`, level, group: `Regal ${name}` });
+        }
+      }
+      for (const name of customPlaces) {
+        if (printGroup !== 'all' && printGroup !== `custom:${name}`) continue;
+        for (const [index, level] of ['Oben', 'Mitte', 'Unten'].entries()) {
+          slots.push({ place: customLevels(name)[2 - index], level, group: `Regal ${name}` });
+        }
+        if (legacyCustomPlaces.includes(name)) slots.push({ place: name, level: 'Alter Einzelplatz', group: `Regal ${name}` });
+      }
+    } else {
+      for (let number = 1; number <= 6; number++) {
+        if (printGroup !== 'all' && printGroup !== `row:${number}`) continue;
+        for (let stack = 1; stack <= 6; stack++) {
+          for (const level of ['Oben', 'Unten']) {
+            slots.push({ place: `R${number}-${stack}-${level}`, level: `Stapel ${stack} · ${level}`, group: `Reihe ${number}` });
+          }
+        }
+      }
+    }
+    const entries = slots.flatMap(slotInfo => {
+      const matches = at(slotInfo.place, lager);
+      if (!matches.length) return printFree ? [{ ...slotInfo, plate: 'Frei', receipt: '' }] : [];
+      return matches.map(r => ({ ...slotInfo, plate: r.kennzeichen || 'Ohne Kennzeichen', receipt: r.belegnummer || '' }));
+    });
+    const escapeHtml = (value: string) => value.replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char] || char);
+    const title = printGroup === 'all' ? `Alle ${lager === 'Zelt' ? 'Regale' : 'Reihen'}` : printGroups.find(g => g.value === printGroup)?.label || 'Lagerliste';
+    const popup = window.open('', '_blank');
+    if (!popup) { setError('Druckfenster wurde blockiert. Bitte Pop-ups für BESICO erlauben.'); return; }
+    const bodyRows = entries.map(entry => `<tr><td>${escapeHtml(entry.group)}</td><td>${escapeHtml(entry.level)}</td><td>${escapeHtml(entry.place)}</td><td>${escapeHtml(entry.plate)}</td><td>${escapeHtml(entry.receipt)}</td><td class="check">□</td></tr>`).join('');
+    popup.document.open();
+    popup.document.write(`<!doctype html><html lang="de"><head><meta charset="utf-8"><title>BESICO Lagerliste – ${escapeHtml(title)}</title><style>
+      @page{size:A4 portrait;margin:13mm}body{font-family:Arial,sans-serif;color:#172b4d;margin:0;font-size:11px}h1{font-size:21px;margin:0 0 6px}p{margin:4px 0 14px;color:#475569}table{width:100%;border-collapse:collapse}th,td{border:1px solid #b7c4d2;padding:7px 5px;text-align:left;overflow-wrap:anywhere}th{background:#e9f2fb}tr{break-inside:avoid}.check{text-align:center;font-size:19px;width:30px}header{border-bottom:2px solid #12365a;margin-bottom:14px;padding-bottom:8px}.toolbar{margin-bottom:15px}@media print{.toolbar{display:none}thead{display:table-header-group}}button{padding:9px 14px;cursor:pointer}
+    </style></head><body><div class="toolbar"><button onclick="window.print()">Liste drucken</button></div><header><h1>BESICO REIFENLAGER</h1><div>LAGERLISTE · ${escapeHtml(lager)} · ${escapeHtml(title)}</div></header><p>Datum: ${escapeHtml(new Date().toLocaleString('de-DE'))} · ${entries.length} Einträge · ${printFree ? 'inkl. freie Plätze' : 'nur belegte Plätze'}</p><table><thead><tr><th>Bereich</th><th>Ebene</th><th>Lagerplatz</th><th>Kennzeichen</th><th>Beleg</th><th>Kontrolle</th></tr></thead><tbody>${bodyRows || '<tr><td colspan="6">Keine belegten Plätze vorhanden.</td></tr>'}</tbody></table></body></html>`);
+    popup.document.close();
+    popup.focus();
+  }
   const currentId = dragged;
   const activeDrag = rows.find(r => r.id === currentId);
 
@@ -331,7 +383,19 @@ export default function LagerUebersicht({ view }: { view: 'Radsätze' | 'Lagerpl
     </div>}
     <div id="lager-map" style={{ marginTop: 18 }}>
       <h2>Lagerplan</h2>
-      <div style={{ display: 'flex', gap: 8, marginBottom: 14 }}>{(['Zelt', 'Lager'] as const).map(x => <button key={x} type="button" style={{ ...btn, background: lager === x ? '#12365a' : '#fff', color: lager === x ? '#fff' : '#12365a' }} onClick={() => { setLager(x); setSelected(null); }}>{x}</button>)}</div>
+      <div style={{ display: 'flex', gap: 8, marginBottom: 14 }}>{(['Zelt', 'Lager'] as const).map(x => <button key={x} type="button" style={{ ...btn, background: lager === x ? '#12365a' : '#fff', color: lager === x ? '#fff' : '#12365a' }} onClick={() => { setLager(x); setSelected(null); setPrintGroup('all'); }}>{x}</button>)}</div>
+      <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'end', padding: 12, marginBottom: 14, background: '#fff', border: '1px solid #dbe3ee', borderRadius: 10 }}>
+        <label style={{ display: 'grid', gap: 5, fontSize: 13, fontWeight: 700 }}>Lagerliste drucken
+          <select aria-label="Bereich für Lagerliste" value={printGroup} onChange={e => setPrintGroup(e.target.value)} style={{ ...btn, minWidth: 190 }}>
+            <option value="all">{lager === 'Zelt' ? 'Alle Regale' : 'Alle Reihen'}</option>
+            {printGroups.map(group => <option key={group.value} value={group.value}>{group.label}</option>)}
+          </select>
+        </label>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 7, fontSize: 13, paddingBottom: 10 }}>
+          <input type="checkbox" checked={printFree} onChange={e => setPrintFree(e.target.checked)} /> Freie Plätze mitdrucken
+        </label>
+        <button type="button" style={{ ...btn, background: '#12365a', color: '#fff', display: 'inline-flex', gap: 7, alignItems: 'center' }} disabled={busy} onClick={printStorageList}><Printer size={16} /> Liste drucken</button>
+      </div>
       <p style={{ fontSize: 13, color: '#64748b' }}>Grün = frei · Rot = belegt · Orange = bestehende Doppelbelegung. Doppelklick auf einen belegten Platz findet die Karte unten. Zum Einlagern auf Grün ziehen. Zum Freigeben einen belegten Platz auf die Ablage unten ziehen oder „Platz freigeben“ wählen.</p>
       {lager === 'Zelt' ? <>
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center', marginBottom: 16 }}>
