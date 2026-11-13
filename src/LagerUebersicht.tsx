@@ -21,7 +21,6 @@ export default function LagerUebersicht({ view }: { view: 'Radsätze' | 'Lagerpl
   const [rows, setRows] = useState<Schein[]>([]);
   const [regale, setRegale] = useState<string[]>([]);
   const [customPlaces, setCustomPlaces] = useState<string[]>([]);
-  const [newCustomPlace, setNewCustomPlace] = useState('');
   const [busy, setBusy] = useState(true);
   const [working, setWorking] = useState(false);
   const [error, setError] = useState('');
@@ -96,41 +95,40 @@ export default function LagerUebersicht({ view }: { view: 'Radsätze' | 'Lagerpl
     return rowCompare || (a.kennzeichen || '').localeCompare(b.kennzeichen || '', 'de', { numeric: true });
   });
   const selectedRows = selected ? at(selected) : [];
-  const rackPlaces = [...regale.flatMap(n => [0, 1, 2].map(i => `${n}0${i}`)), ...customPlaces];
+  const customLevels = (name: string) => [`${name}-U`, `${name}-M`, `${name}-O`];
+  // Preserve any previously occupied legacy single slots until manually moved.
+  const legacyCustomPlaces = customPlaces.filter(name => at(name, 'Zelt').length > 0);
+  const rackPlaces = [...regale.flatMap(n => [0, 1, 2].map(i => `${n}0${i}`)), ...customPlaces.flatMap(customLevels), ...legacyCustomPlaces];
   const warehousePlaces = Array.from({ length: 6 }, (_, r) => Array.from({ length: 6 }, (_, s) => [`R${r + 1}-${s + 1}-Unten`, `R${r + 1}-${s + 1}-Oben`])).flat(2);
   const currentId = dragged;
   const activeDrag = rows.find(r => r.id === currentId);
 
   async function addRegal() {
-    const nummer = newRegal.trim();
-    if (!/^\d{4}$/.test(nummer)) { setError('Regalnummer: bitte genau 4 Ziffern eingeben (z. B. 1009).'); return; }
-    if (regale.includes(nummer)) { setError('Dieses Regal existiert bereits.'); return; }
+    const name = newRegal.trim().replace(/\s+/g, ' ');
+    if (!name || name.length > 54) { setError('Regalname: bitte 1–54 Zeichen eingeben.'); return; }
+    if (!/^[\p{L}\p{N} _./-]+$/u.test(name)) { setError('Regalname: nur Buchstaben, Zahlen, Leerzeichen, /, -, _ und Punkt verwenden.'); return; }
+    if (regale.some(n => norm(n) === norm(name)) || customPlaces.some(n => norm(n) === norm(name))) { setError('Dieses Regal existiert bereits.'); return; }
+    const places = /^\d{4}$/.test(name) ? [0, 1, 2].map(i => `${name}0${i}`) : [`${name}-U`, `${name}-M`, `${name}-O`];
+    if (places.some(p => rackPlaces.some(existing => norm(existing) === norm(p)) || at(p, 'Zelt').length > 0)) {
+      setError('Ein Lagerplatz mit diesem Namen ist bereits vorhanden.'); return;
+    }
     setWorking(true); setError(''); setMessage('');
-    const { error: e } = await supabase.from('reifenlager_regale').insert({ nummer });
+    const table = /^\d{4}$/.test(name) ? 'reifenlager_regale' : 'reifenlager_einzelplaetze';
+    const values = table === 'reifenlager_regale' ? { nummer: name } : { name };
+    const { error: e } = await supabase.from(table).insert(values);
     if (e) setError('Regal hinzufügen: ' + e.message);
-    else { setNewRegal(''); setMessage(`Regal ${nummer} hinzugefügt.`); await refresh(); }
+    else { setNewRegal(''); setMessage(`Regal ${name} mit 3 Ebenen hinzugefügt.`); await refresh(); }
     setWorking(false);
   }
 
-  async function addCustomPlace() {
-    const name = newCustomPlace.trim().replace(/\s+/g, ' ');
-    if (!name || name.length > 60) { setError('Einzelplatz: Name mit 1–60 Zeichen eingeben.'); return; }
-    if (!/^[\p{L}\p{N} _./-]+$/u.test(name)) { setError('Einzelplatz: nur Buchstaben, Zahlen, Leerzeichen, /, -, _ und Punkt verwenden.'); return; }
-    if (rackPlaces.some(p => norm(p) === norm(name))) { setError('Dieser Lagerplatz existiert bereits.'); return; }
-    setWorking(true); setError(''); setMessage('');
-    const { error: e } = await supabase.from('reifenlager_einzelplaetze').insert({ name });
-    if (e) setError('Einzelplatz hinzufügen: ' + e.message);
-    else { setNewCustomPlace(''); setMessage(`Einzelplatz ${name} hinzugefügt.`); await refresh(); }
-    setWorking(false);
-  }
-
-  async function deleteCustomPlace(name: string) {
-    if (at(name, 'Zelt').length) { setError(`Einzelplatz ${name} ist belegt. Zuerst den Radsatz verschieben.`); return; }
-    if (!window.confirm(`Einzelplatz ${name} wirklich löschen?`)) return;
+  async function deleteCustomRegal(name: string) {
+    const places = [name, ...customLevels(name)];
+    if (places.some(p => at(p, 'Zelt').length > 0)) { setError(`Regal ${name} ist belegt. Zuerst die Radsätze verschieben.`); return; }
+    if (!window.confirm(`Regal ${name} wirklich löschen?`)) return;
     setWorking(true); setError(''); setMessage('');
     const { error: e } = await supabase.from('reifenlager_einzelplaetze').delete().eq('name', name);
-    if (e) setError('Einzelplatz löschen: ' + e.message);
-    else { setSelected(null); setMessage(`Einzelplatz ${name} gelöscht.`); await refresh(); }
+    if (e) setError('Regal löschen: ' + e.message);
+    else { setSelected(null); setMessage(`Regal ${name} gelöscht.`); await refresh(); }
     setWorking(false);
   }
 
@@ -157,7 +155,7 @@ export default function LagerUebersicht({ view }: { view: 'Radsätze' | 'Lagerpl
     setWorking(true); setError(''); setMessage('');
     // The database function atomically checks the destination and updates the receipt.
     // Its unique index prevents collisions even when two users move wheels simultaneously.
-    const isCustom = destination === 'Zelt' && customPlaces.some(p => norm(p) === norm(place));
+    const isCustom = destination === 'Zelt' && customPlaces.some(name => customLevels(name).some(p => norm(p) === norm(place)) || (norm(name) === norm(place) && legacyCustomPlaces.includes(name)));
     // The existing RPC may validate only numbered shelves. Custom slots use the
     // same RLS-protected update path as 'Platz freigeben'. A partial unique
     // database index (see accompanying SQL) protects against concurrent moves.
@@ -336,18 +334,22 @@ export default function LagerUebersicht({ view }: { view: 'Radsätze' | 'Lagerpl
       <div style={{ display: 'flex', gap: 8, marginBottom: 14 }}>{(['Zelt', 'Lager'] as const).map(x => <button key={x} type="button" style={{ ...btn, background: lager === x ? '#12365a' : '#fff', color: lager === x ? '#fff' : '#12365a' }} onClick={() => { setLager(x); setSelected(null); }}>{x}</button>)}</div>
       <p style={{ fontSize: 13, color: '#64748b' }}>Grün = frei · Rot = belegt · Orange = bestehende Doppelbelegung. Doppelklick auf einen belegten Platz findet die Karte unten. Zum Einlagern auf Grün ziehen. Zum Freigeben einen belegten Platz auf die Ablage unten ziehen oder „Platz freigeben“ wählen.</p>
       {lager === 'Zelt' ? <>
-        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center', marginBottom: 16 }}><input aria-label="Neue Regalnummer" placeholder="Neues Regal, z. B. 1009" value={newRegal} onChange={e => setNewRegal(e.target.value)} style={{ padding: 10, border: '1px solid #cbd5e1', borderRadius: 8 }} /><button type="button" disabled={working} style={btn} onClick={() => void addRegal()}><Plus size={15} /> Regal hinzufügen</button></div>
-        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center', marginBottom: 12 }}>
-          <input aria-label="Neuer Einzelplatz" placeholder="Einzelplatz, z. B. 1008/2, Boden 1, MW/VFW" value={newCustomPlace} onChange={e => setNewCustomPlace(e.target.value)} style={{ padding: 10, border: '1px solid #cbd5e1', borderRadius: 8, minWidth: 270 }} />
-          <button type="button" disabled={working} style={btn} onClick={() => void addCustomPlace()}><Plus size={15} /> Einzelplatz hinzufügen</button>
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center', marginBottom: 16 }}>
+          <input aria-label="Neuer Regalname" placeholder="Regalname, z. B. 1009, 1008/2, MW/VFW" value={newRegal} onChange={e => setNewRegal(e.target.value)} style={{ padding: 10, border: '1px solid #cbd5e1', borderRadius: 8, minWidth: 290 }} />
+          <button type="button" disabled={working} style={btn} onClick={() => void addRegal()}><Plus size={15} /> Regal hinzufügen</button>
         </div>
-        {customPlaces.length > 0 && <div style={{ marginBottom: 16 }}><strong>Eigene Einzelplätze</strong><div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))', gap: 12, marginTop: 8 }}>
-          {customPlaces.map(name => <div key={name} style={{ background: '#fff', border: '1px solid #dbe3ee', borderRadius: 12, padding: 12 }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}><strong>{name}</strong><button type="button" title={`Einzelplatz ${name} löschen`} disabled={working} onClick={() => void deleteCustomPlace(name)} style={{ ...btn, color: '#b91c1c', padding: 5 }}><Trash2 size={16} /></button></div>
-            {slot(name)}
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))', gap: 12 }}>
+          {regale.map(n => <div key={`standard-${n}`} style={{ background: '#fff', border: '1px solid #dbe3ee', borderRadius: 12, padding: 12 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}><strong>Regal {n}</strong><button type="button" title={`Regal ${n} löschen`} disabled={working} onClick={() => void deleteRegal(n)} style={{ ...btn, color: '#b91c1c', padding: 5 }}><Trash2 size={16} /></button></div>
+            <div style={{ display: 'grid', gap: 8, marginTop: 12 }}>{[2, 1, 0].map(i => <div key={i}><small>{['Unten', 'Mitte', 'Oben'][i]}</small>{slot(`${n}0${i}`)}</div>)}</div>
           </div>)}
-        </div></div>}
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))', gap: 12 }}>{regale.map(n => <div key={n} style={{ background: '#fff', border: '1px solid #dbe3ee', borderRadius: 12, padding: 12 }}><div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}><strong>Regal {n}</strong><button type="button" title={`Regal ${n} löschen`} disabled={working} onClick={() => void deleteRegal(n)} style={{ ...btn, color: '#b91c1c', padding: 5 }}><Trash2 size={16} /></button></div><div style={{ display: 'grid', gap: 8, marginTop: 12 }}>{[2, 1, 0].map(i => <div key={i}><small>{['Unten', 'Mitte', 'Oben'][i]}</small>{slot(`${n}0${i}`)}</div>)}</div></div>)}</div>
+          {customPlaces.map(name => <div key={`custom-${name}`} style={{ background: '#fff', border: '1px solid #dbe3ee', borderRadius: 12, padding: 12 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}><strong>Regal {name}</strong><button type="button" title={`Regal ${name} löschen`} disabled={working} onClick={() => void deleteCustomRegal(name)} style={{ ...btn, color: '#b91c1c', padding: 5 }}><Trash2 size={16} /></button></div>
+            <div style={{ display: 'grid', gap: 8, marginTop: 12 }}>{[2, 1, 0].map(i => <div key={i}><small>{['Unten', 'Mitte', 'Oben'][i]}</small>{slot(customLevels(name)[i])}</div>)}
+              {legacyCustomPlaces.includes(name) && <div><small>Bisheriger Einzelplatz (belegt)</small>{slot(name)}</div>}
+            </div>
+          </div>)}
+        </div>
       </> : <div style={{ overflowX: 'auto', background: '#fff', borderRadius: 12, padding: 12 }}><div style={{ display: 'grid', gridTemplateColumns: 'repeat(6,minmax(116px,1fr))', gap: 9, minWidth: 740 }}>{[1, 2, 3, 4, 5, 6].map(r => <div key={r}><strong style={{ display: 'block', textAlign: 'center', marginBottom: 8 }}>Reihe {r}</strong><div style={{ display: 'grid', gap: 8 }}>{[6, 5, 4, 3, 2, 1].map(s => <div key={s} style={{ border: '1px solid #e2e8f0', padding: 4, borderRadius: 8 }}><strong style={{ display: 'block', textAlign: 'center', fontSize: 12 }}>Stapel {s}</strong>{slot(`R${r}-${s}-Oben`, 'Oben')}{slot(`R${r}-${s}-Unten`, 'Unten')}</div>)}</div></div>)}</div><div style={{ textAlign: 'center', background: '#e2e8f0', marginTop: 12, padding: 10, borderRadius: 8, fontWeight: 700 }}>EINGANG — unten · Stapel 1 unten, Stapel 6 oben</div></div>}
       {selected && <div style={{ marginTop: 18, padding: 14, background: '#fff', border: '2px solid #12365a', borderRadius: 12 }}><strong>{lager} · {selected}</strong>{selectedRows.length ? selectedRows.map(r => <p key={r.id} style={{ margin: '8px 0' }}>{r.kennzeichen || 'Ohne Kennzeichen'} · {r.belegnummer || '—'} — Belegt. <button type="button" disabled={working} style={{ ...btn, marginLeft: 8 }} onClick={() => void releasePlace(r.id)}>Platz freigeben</button></p>) : <p>Frei — Radsatz aus der Liste unten hierher ziehen.</p>}</div>}
     </div>
